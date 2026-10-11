@@ -4,7 +4,14 @@
 #include "atmcdLXd.h"
 #include "cpp_socket.hpp"
 #include "cppfits.hpp"
+#include "DualWheelMapper.hpp"
 #include "fits_header.hpp"
+#include "IFilterWheel.hpp"
+#ifdef MOCK_WHEEL
+#include "MockFilterWheel.hpp"
+#else
+#include "MaxonFilterWheel.hpp"
+#endif
 
 #include <chrono>
 #include <cmath>
@@ -17,6 +24,7 @@
 #endif
 #include <fstream>
 #include <pthread.h>
+#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 
@@ -29,6 +37,11 @@ extern int sig_abort_set;
 extern int sig_interrupt_set;
 extern int abort_exposure_set;
 
+// Global filter wheel instance - driver selected at compile time:
+//   --enable-mock-wheel -> MockFilterWheel (no hardware)
+//   (default)           -> MaxonFilterWheel (EPOS4 via USB)
+andor2k::IFilterWheel *g_wheel = nullptr;
+
 // buffers and constants for socket communication
 constexpr int INTITIALIZE_TO_TEMP = -50;
 char fits_file[MAX_FITS_FILE_SIZE] = {'\0'};
@@ -40,6 +53,12 @@ void kill_daemon(int signal) noexcept {
   printf(
       "[DEBUG][%s] Caught signal (#%d); shutting down daemon (traceback: %s)\n",
       date_str(now_str), signal, __func__);
+  if (g_wheel) {
+    g_wheel->Halt();
+    g_wheel->Disconnect();
+    delete g_wheel;
+    g_wheel = nullptr;
+  }
   system_shutdown(); // RUN
   printf("[DEBUG][%s] Goodbye!\n", date_str(now_str));
   exit(signal);
@@ -50,6 +69,11 @@ void segfault_sigaction(int signal, siginfo_t *si, void *arg) {
   printf("[FATAL][%s] Caught segfault at address %p; shutting down daemon "
          "(traceback: %s)\n",
          date_str(now_str), si->si_addr, __func__);
+  if (g_wheel) {
+    g_wheel->Halt();
+    delete g_wheel;
+    g_wheel = nullptr;
+  }
   system_shutdown(); // RUN
   printf("[DEBUG][%s] Goodbye!\n", date_str(now_str));
   exit(signal);
@@ -240,6 +264,116 @@ int set_param_value(const char *command, AndorParameters &params) noexcept {
   return 0;
 }
 
+int handle_wheel_command(const char *command, const Socket &socket) noexcept {
+  char buf[MAX_SOCKET_BUFFER_SIZE];
+
+  // "wheel status" - most frequent; check first
+  if (!std::strncmp(command, "wheel status", 12)) {
+    socket_sprintf(socket, buf,
+                   "fconnected:1;fmoving:%d;fpos:%d;"
+                   "fupper_qc:%ld;flower_qc:%ld;fhomed:%d",
+                   g_wheel->IsMoving() ? 1 : 0, g_wheel->GetPosition(),
+                   g_wheel->GetUpperQC(), g_wheel->GetLowerQC(),
+                   g_wheel->IsHomed() ? 1 : 0);
+    return 0;
+  }
+
+  if (!std::strncmp(command, "wheel home", 10)) {
+    int err = g_wheel->GoHome();
+    if (err == 0) {
+      // fmove_qc:0 tells the client to keep the indeterminate bar
+      // (homing distance is not known in advance).
+      socket_sprintf(socket, buf, "fmove_qc:0;");
+      auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(60);
+      int tick = 0;
+      while (g_wheel->IsMoving()) {
+        if (std::chrono::steady_clock::now() > deadline) {
+          g_wheel->Halt();
+          socket_sprintf(socket, buf, "done;error:10;status:timeout;");
+          return 10;
+        }
+        // Non-blocking peek: client may send "wheel halt" mid-move.
+        {
+          char rbuf[32] = {0};
+          if (socket.recv(rbuf, sizeof(rbuf) - 1, MSG_DONTWAIT) > 0 &&
+              std::strncmp(rbuf, "wheel halt", 10) == 0)
+            g_wheel->Halt();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Every 200 ms send an intermediate QC update for the GUI.
+        if (++tick % 2 == 0) {
+          socket_sprintf(socket, buf, "fupper_qc:%ld;flower_qc:%ld;",
+                         g_wheel->GetUpperQC(), g_wheel->GetLowerQC());
+        }
+      }
+    }
+    socket_sprintf(socket, buf, "done;error:%d;", err);
+    return err;
+  }
+
+  if (!std::strncmp(command, "wheel halt", 10)) {
+    int err = g_wheel->Halt();
+    socket_sprintf(socket, buf, "done;error:%d;", err);
+    return err;
+  }
+
+  if (!std::strncmp(command, "wheel setpos", 12)) {
+    char *end;
+    int slot = static_cast<int>(std::strtol(command + 12, &end, 10));
+    if (end == command + 12 || slot < 0 || slot > 10) {
+      socket_sprintf(socket, buf, "done;error:1;");
+      return 1;
+    }
+    long upper_before = g_wheel->GetUpperQC();
+    long lower_before = g_wheel->GetLowerQC();
+    // Compute the planned travel distance BEFORE starting the move so the
+    // client can display a real percentage in the progress bar.
+    auto phys = andor2k::DualWheelMapper::MapVirtualToPhysical(
+        slot, upper_before, lower_before);
+    long delta_u = phys.upper_qc - upper_before;
+    long delta_l = phys.lower_qc - lower_before;
+    long move_qc = std::max(delta_u, delta_l);
+    int err = g_wheel->SetPosition(slot);
+    if (err == 0) {
+      // First streaming line: total QC for this move (0 -> client shows
+      // indeterminate bar; > 0 -> client shows a real percentage).
+      socket_sprintf(socket, buf, "fmove_qc:%ld;", move_qc);
+      auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(60);
+      int tick = 0;
+      while (g_wheel->IsMoving()) {
+        if (std::chrono::steady_clock::now() > deadline) {
+          g_wheel->Halt();
+          socket_sprintf(socket, buf, "done;error:10;status:timeout;");
+          return 10;
+        }
+        // Non-blocking peek: client may send "wheel halt" mid-move.
+        {
+          char rbuf[32] = {0};
+          if (socket.recv(rbuf, sizeof(rbuf) - 1, MSG_DONTWAIT) > 0 &&
+              std::strncmp(rbuf, "wheel halt", 10) == 0)
+            g_wheel->Halt();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Every 200 ms send an intermediate QC update for the GUI.
+        if (++tick % 2 == 0) {
+          socket_sprintf(socket, buf, "fupper_qc:%ld;flower_qc:%ld;",
+                         g_wheel->GetUpperQC(), g_wheel->GetLowerQC());
+        }
+      }
+    }
+    socket_sprintf(socket, buf, "done;error:%d;", err);
+    return err;
+  }
+
+  // Unknown wheel sub-command
+  fprintf(stderr, "[ERROR][%s] Unknown wheel command: \"%s\"\n",
+          date_str(now_str), command);
+  socket_sprintf(socket, buf, "done;error:1;");
+  return 1;
+}
+
 int resolve_command(const char *command, const Socket &socket,
                     AndorParameters &params) noexcept {
   if (!(std::strncmp(command, "settemp", 7))) {
@@ -252,10 +386,18 @@ int resolve_command(const char *command, const Socket &socket,
   } else if (!(std::strncmp(command, "setparam", 8))) {
     return set_param_value(command, params);
   } else if (!(std::strncmp(command, "image", 5))) {
+    if (g_wheel && g_wheel->IsMoving()) {
+      char buf[MAX_SOCKET_BUFFER_SIZE];
+      socket_sprintf(socket, buf,
+                     "done;error:1;status:Wheel is moving - halt or wait;");
+      return 1;
+    }
     return get_image(command, socket, params);
   } else if (!(std::strncmp(command, "abort", 5))) {
     abort_exposure_set = true;
     return 0;
+  } else if (!(std::strncmp(command, "wheel", 5))) {
+    return handle_wheel_command(command, socket);
   } else {
     fprintf(stderr,
             "[ERROR][%s] Failed to resolve command: \"%s\"; doing nothing!\n",
@@ -354,6 +496,21 @@ int main() {
   std::this_thread::sleep_for(2000ms);
   printf("... ok!\n");
 
+  // Select filter wheel driver based on build configuration
+#ifdef MOCK_WHEEL
+  g_wheel = new andor2k::MockFilterWheel();
+#else
+  g_wheel = new andor2k::MaxonFilterWheel();
+#endif
+  if (g_wheel->Connect() != 0) {
+    fprintf(stderr,
+            "[WRNNG][%s] Filter wheel Connect() failed; "
+            "wheel commands will return errors\n",
+            date_str(now_str));
+  } else {
+    printf("[DEBUG][%s] Filter wheel ready\n", date_str(now_str));
+  }
+
   // cool down if needed RUN
   if (cool_to_temperature(INTITIALIZE_TO_TEMP)) {
     fprintf(stderr, "[FATAL][%s] Failed to set target temperature...exiting\n",
@@ -391,6 +548,12 @@ int main() {
   }
 
   // shutdown system
+  if (g_wheel) {
+    g_wheel->Halt();
+    g_wheel->Disconnect();
+    delete g_wheel;
+    g_wheel = nullptr;
+  }
   system_shutdown();
 
   return 0;
