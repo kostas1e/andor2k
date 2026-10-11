@@ -233,7 +233,10 @@ void MaxonFilterWheel::update_qc(std::atomic<long> &acc, int &prev_raw,
 
 // Index-pulse sensor state machine.
 // Called each poll cycle in SetPosition() for each wheel.
-// Reads DI1 (object 0x60FD bit 16), detects edges, and on the FIRST rising
+// Reads DI1 via 0x60FD bit 2 (CiA 402 home-switch logical input - requires DI1
+// to be assigned as "Home Switch" in EPOS Studio: Device -> Parameter ->
+// Inputs/Outputs -> Digital Inputs -> DI1 Function). Detects edges and on the
+// FIRST rising
 // edge of each double-pulse pair snaps the QC accumulator to the nearest
 // rotation boundary to eliminate belt/pulley drift.
 // The counter is NOT reset to zero - it is corrected in-place by removing
@@ -241,7 +244,9 @@ void MaxonFilterWheel::update_qc(std::atomic<long> &acc, int &prev_raw,
 void MaxonFilterWheel::poll_sensor(void *handle, unsigned short node_id,
                                    std::atomic<long> &qc, SensorState &state,
                                    bool &di1_prev, long sensor_offset) {
-  // DI1 = bit 16 of object 0x60FD (EPOS4 digital inputs, manufacturer-specific)
+  // DI1 state is at bit 2 of 0x60FD (CiA 402 home-switch logical input).
+  // Bit 16 is the raw physical DI1 pin; in practice it stays 0 regardless of
+  // sensor state (EPOS4 firmware quirk) - do NOT use it.
   unsigned int di_val = 0, bytes = 0, err = 0;
   VCS_GetObject(handle, node_id, 0x60FD, 0x00, &di_val, sizeof(di_val), &bytes,
                 &err);
@@ -372,6 +377,21 @@ bool MaxonFilterWheel::seek_next_rise(
   unsigned int err = 0;
   int poll_cnt = 0;
 
+  // One-shot diagnostic: print the full raw 0x60FD register value and all
+  // candidate bits. If bit 2 never toggles on real hardware, check bit 16
+  // and bits 17-31 here to find which one the sensor is actually wired to.
+  {
+    unsigned int dbg_val = 0, dbg_bytes = 0, dbg_err = 0;
+    VCS_GetObject(handle, node, 0x60FD, 0x00, &dbg_val, sizeof(dbg_val),
+                  &dbg_bytes, &dbg_err);
+    printf("[MaxonFilterWheel] node %u: seek_next_rise entry  "
+           "0x60FD=0x%08X  bit2=%u(home-sw)  bit16=%u(raw-DI1)  "
+           "bit17=%u  bit18=%u  bit19=%u  bit20=%u\n",
+           node, dbg_val, (dbg_val >> 2) & 1u, (dbg_val >> 16) & 1u,
+           (dbg_val >> 17) & 1u, (dbg_val >> 18) & 1u, (dbg_val >> 19) & 1u,
+           (dbg_val >> 20) & 1u);
+  }
+
   auto read_di1 = [&]() -> bool {
     unsigned int di_val = 0, bytes = 0;
     VCS_GetObject(handle, node, 0x60FD, 0x00, &di_val, sizeof(di_val), &bytes,
@@ -401,10 +421,14 @@ bool MaxonFilterWheel::seek_next_rise(
     std::this_thread::sleep_for(5ms);
     update_qc(qc_ref, raw_prev, handle, node);
     bool di1 = read_di1();
-    if (++poll_cnt % 200 == 0)
-      printf("[MaxonFilterWheel] node %u: seek_next_rise poll[%d] "
-             "di1=%d low_qc=%ld\n",
-             node, poll_cnt, (int)di1, qc_ref.load() - low_start_qc);
+    if (++poll_cnt % 200 == 0) {
+      unsigned int dbg_val = 0, dbg_bytes = 0, dbg_err = 0;
+      VCS_GetObject(handle, node, 0x60FD, 0x00, &dbg_val, sizeof(dbg_val),
+                    &dbg_bytes, &dbg_err);
+      printf("[MaxonFilterWheel] node %u: seek poll[%d] "
+             "di1=%d low_qc=%ld  0x60FD=0x%08X\n",
+             node, poll_cnt, (int)di1, qc_ref.load() - low_start_qc, dbg_val);
+    }
     if (di1 && !prev_di1) { // rising edge
       low_qc_before_rise = qc_ref.load() - low_start_qc;
       return true;
