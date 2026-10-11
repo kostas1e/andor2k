@@ -53,7 +53,8 @@ pkginclude_HEADERS = \
 	get_exposure.hpp \
 	acquisition_reporter.hpp \
 	acquisition_series_reporter.hpp \
-	cbase64.hpp
+	cbase64.hpp \
+	IFilterWheel.hpp
 
 ##
 ##  Source files (distributed).
