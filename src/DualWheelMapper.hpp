@@ -14,28 +14,64 @@ namespace andor2k {
 class DualWheelMapper {
 public:
   // Tunable physical constants
-  // QC_PER_SLOT is the primary measured value - update it after hardware
-  // calibration; all other constants derive from it automatically.
+  // QC_PER_ROTATION is the primary measured value - update it after hardware
+  // calibration using the RISE1-to-RISE1 sensor method (see commissioning
+  // notes in andor2k_cookbook.tex). QC_PER_SLOT is derived; integer division
+  // is exact when the wheel has uniform slot spacing (designed-in property).
   // Future migration to runtime config: replace this constexpr block with a
   // static WheelConfig load(const char *path) factory; every caller that
   // references DualWheelMapper::X will continue to compile unchanged.
-  static constexpr long QC_PER_SLOT = 1433928L; // PRIMARY - calibrate this
   static constexpr int SLOTS_PER_WHEEL = 6;
   static constexpr long QC_PER_ROTATION =
-      QC_PER_SLOT * SLOTS_PER_WHEEL; // derived
+      8603568L; // PRIMARY - measure via RISE1-to-RISE1
+  static constexpr long QC_PER_SLOT =
+      QC_PER_ROTATION / SLOTS_PER_WHEEL; // derived
 
-  // Homing sensor offset: QC stored in the accumulator when the home sensor
-  // fires for the first time going forward from slot 0 (clear aperture).
-  // Physical meaning: sensor flag is ~3 slot-spacings from slot 0.
-  static constexpr long NORMAL_SENSOR_OFFSET = 3L * QC_PER_SLOT;
-  // Reversed wheel (mirrored motor mount): forward encoder direction is
-  // physically backward, so the sensor is approached from the opposite side.
-  // The first rising edge occurs QC_PER_ROTATION - NORMAL_SENSOR_OFFSET into
-  // the rotation from slot 0. For our geometry (sensor at 1/2 rotation) these
-  // two values happen to be equal; keep them separate for post-calibration
-  // adjustment (subtract sensor-flag geometry after hardware measurement).
-  static constexpr long REVERSED_SENSOR_OFFSET =
-      QC_PER_ROTATION - NORMAL_SENSOR_OFFSET;
+  // DIRECTION CONVENTION (defined from positive motor velocity):
+  //
+  //   Lower wheel (Node 2) positive velocity -> QC+ -> slots:
+  //   Clear->6->7->8->9->10
+  //                         This is the REFERENCE direction.
+  //                         LOWER_WHEEL_REVERSED = false.
+  //
+  //   Upper wheel (Node 1) positive velocity -> QC+ -> slots:
+  //   Clear->5->4->3->2->1
+  //                         Opposite physical direction to lower.
+  //                         UPPER_WHEEL_REVERSED = true.
+  //
+  // SENSOR OFFSET CONVENTION:
+  //
+  //   LOWER_SENSOR_OFFSET_QC = QC accumulated going FORWARD (reference dir)
+  //     from slot 0 (clear) until RISE1 fires.
+  //     RISE1 = leading edge of flag tab 1 enters sensor.
+  //
+  //   UPPER_SENSOR_OFFSET_QC = QC accumulated going FORWARD in upper wheel's
+  //     frame (opposite physical direction) from slot 0 until RISE1 fires.
+  //     RISE1 = trailing edge of flag tab 2 enters sensor from opposite side.
+  //
+  //   These are NOT related by UPPER = QC_PER_ROTATION - LOWER.
+  //   The initial values happen to be equal (both = QC_PER_ROTATION/2 for a
+  //   6-slot wheel with sensor near 180 deg) but they diverge after calibration
+  //   because the two RISE1 events trigger at different physical positions
+  //   (offset ~tab_width + inter-pulse gap) and the two assemblies have
+  //   independent sensor mounting tolerances.
+  //
+  //   CALIBRATION RULE (same for both wheels):
+  //     After home + setpos N, inspect physical alignment.
+  //     Filter/aperture PAST centre -> wheel went too far -> INCREASE
+  //     offset.
+  //     Filter/aperture BEFORE centre -> wheel stopped short -> DECREASE
+  //     offset.
+  //     See commissioning.md Sec.8 for per-wheel procedure.
+  static constexpr long LOWER_SENSOR_OFFSET_QC =
+      3L * QC_PER_SLOT; // initial ~180 deg
+  static constexpr long UPPER_SENSOR_OFFSET_QC =
+      QC_PER_ROTATION - 3L * QC_PER_SLOT; // initial ~180 deg
+
+  // Legacy aliases - kept so existing references compile unchanged.
+  // Prefer the per-wheel names above for all new or modified code.
+  static constexpr long NORMAL_SENSOR_OFFSET = LOWER_SENSOR_OFFSET_QC;
+  static constexpr long REVERSED_SENSOR_OFFSET = UPPER_SENSOR_OFFSET_QC;
   // Maximum allowable snap correction; larger drift invalidates home.
   static constexpr long MAX_DRIFT_QC = 100000L;
 
@@ -55,15 +91,14 @@ public:
   // tolerance zone of adjacent slots never overlap.
   static constexpr long SLOT_TOLERANCE_QC = QC_PER_SLOT / 10; // ~143 393 QC
 
-  // One or both motors may be mounted mirrored, reversing physical slot order
-  // under positive velocity (0->5->4->3->2->1 instead of 0->1->2->3->4->5).
-  // When true, MapVirtualToPhysical applies a forward-index reversal for that
-  // wheel: physical slot k -> encoder index (SLOTS_PER_WHEEL-k)%6.
-  //
-  // Set the flag to false (or git revert the software-slot-reversal commit)
-  // if the EPOS4 polarity bit 0x607E is configured on that drive instead.
-  static constexpr bool UPPER_WHEEL_REVERSED = true;  // upper motor mirrored
-  static constexpr bool LOWER_WHEEL_REVERSED = false; // lower motor normal
+  // Reversal flags - see direction convention above.
+  // Set UPPER_WHEEL_REVERSED = false (and re-calibrate UPPER_SENSOR_OFFSET_QC)
+  // if the EPOS4 encoder polarity bit (0x607E bit 0) is flipped on the upper
+  // drive in EPOS Studio instead of using software reversal.
+  static constexpr bool UPPER_WHEEL_REVERSED =
+      true; // positive V -> slots Clear->5->4->3->2->1
+  static constexpr bool LOWER_WHEEL_REVERSED =
+      false; // positive V -> slots Clear->6->7->8->9->10
   struct PhysicalTarget {
     int upper_slot;
     int lower_slot;

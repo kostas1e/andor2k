@@ -475,13 +475,13 @@ bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
     log_epos_error("VCS_SetVelocityProfile", node, err);
     return false;
   }
-  if (!VCS_MoveWithVelocity(handle, node, (long)HOMING_VELOCITY_RPM, &err)) {
+  if (!VCS_MoveWithVelocity(handle, node, (long)PROFILE_VELOCITY, &err)) {
     log_epos_error("VCS_MoveWithVelocity", node, err);
     return false;
   }
   printf("[MaxonFilterWheel] node %u: searching for home sensor "
-         "at %d RPM...\n",
-         node, HOMING_VELOCITY_RPM);
+         "at %u RPM...\n",
+         node, PROFILE_VELOCITY);
 
   // 2. Find RISE1 using seek_next_rise loop
   // seek_next_rise() returns the QC elapsed in the LOW state before each

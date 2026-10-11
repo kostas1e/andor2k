@@ -22,13 +22,6 @@ namespace andor2k {
  * Because the wheels accumulate position in forward-only mode the counters will
  * grow beyond int range over time. We therefore maintain separate 64-bit
  * accumulators that are updated by detecting int wrap-around.
- *
- * IMPORTANT: This class must be validated against real hardware before use.
- * Known deferred issues:
- *   - Homing sensor triggers twice per revolution (hardware flaw); workaround
- * TBD.
- *   - QC_PER_ROTATION value needs physical measurement / Motor.pdf
- * verification.
  */
 class MaxonFilterWheel : public IFilterWheel {
 public:
@@ -90,12 +83,7 @@ private:
   bool m_lower_di1_prev{false};
 
   // Software homing constants
-  // Motor speed used during homing. Must match PROFILE_VELOCITY
-  // (MaxonFilterWheel.cpp) so detection latency is identical for homing and
-  // periodic index correction, keeping NORMAL_SENSOR_OFFSET calibration
-  // consistent.
-  static constexpr int HOMING_VELOCITY_RPM = 6000; // == PROFILE_VELOCITY
-
+  // TODO(cal): run the commissioning procedure below on first hardware use.
   // QC value written to the EPOS4 position register (via 0x607C home offset
   // + VCS_FindHome HM_ACTUAL_POSITION) when each wheel's sensor fires.
   // Clear slot (virtual 0) lives at multiples of QC_PER_ROTATION.
@@ -103,7 +91,6 @@ private:
   // SetPosition(0) will then move the wheel the remaining
   //   (QC_PER_ROTATION - offset) QC to reach the first clear-slot.
   //
-  // NEEDS CALIBRATION during first hardware commissioning:
   //   1. Home the wheels.
   //   2. Press Go -> slot 0 (clear).
   //   3. If the wheel does not land on the clear aperture, measure the
@@ -113,19 +100,13 @@ private:
   //         If the wrong trigger is caught, add QC_PER_ROTATION / 2
   //         (~4 303 284 QC) to each offset.
   //   These constants will be exported to a config file in a later revision.
-  // QC stored in the accumulator when the home sensor fires.
-  // Derived from DualWheelMapper: NORMAL for a standard wheel, REVERSED for a
-  // mirrored-mount wheel (sensor approached from the opposite direction).
-  // Refine DualWheelMapper::NORMAL_SENSOR_OFFSET (= 3 * QC_PER_SLOT) after
-  // hardware calibration; these values update automatically.
+  // Per-wheel sensor offsets - reference the independently-calibrated constants
+  // in DualWheelMapper. Do NOT derive one from the other (see
+  // DualWheelMapper.hpp).
   static constexpr long UPPER_HOMING_SENSOR_OFFSET_QC =
-      DualWheelMapper::UPPER_WHEEL_REVERSED
-          ? DualWheelMapper::REVERSED_SENSOR_OFFSET
-          : DualWheelMapper::NORMAL_SENSOR_OFFSET;
+      DualWheelMapper::UPPER_SENSOR_OFFSET_QC;
   static constexpr long LOWER_HOMING_SENSOR_OFFSET_QC =
-      DualWheelMapper::LOWER_WHEEL_REVERSED
-          ? DualWheelMapper::REVERSED_SENSOR_OFFSET
-          : DualWheelMapper::NORMAL_SENSOR_OFFSET;
+      DualWheelMapper::LOWER_SENSOR_OFFSET_QC;
 
   std::atomic<int> m_pos{-1};
   std::atomic<bool> m_moving{false};
@@ -143,7 +124,7 @@ private:
   void update_qc(std::atomic<long> &acc, int &prev_raw, void *handle,
                  unsigned short node_id);
 
-  // Home one wheel by moving forward at HOMING_VELOCITY_RPM until DI1 fires,
+  // Home one wheel by moving forward at PROFILE_VELOCITY until DI1 fires,
   // then setting the EPOS4 position register to sensor_offset via 0x607C /
   // VCS_FindHome(HM_ACTUAL_POSITION). Returns true on success.
   // Respects m_halt_requested; on halt returns false without leaving motor

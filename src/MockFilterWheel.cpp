@@ -131,12 +131,8 @@ int MockFilterWheel::GoHome() {
 
     if (!m_halt_requested.load()) {
       // Set accumulators to the per-wheel sensor offset (mirrors real homing).
-      const long upper_off = DualWheelMapper::UPPER_WHEEL_REVERSED
-                                 ? DualWheelMapper::REVERSED_SENSOR_OFFSET
-                                 : DualWheelMapper::NORMAL_SENSOR_OFFSET;
-      const long lower_off = DualWheelMapper::LOWER_WHEEL_REVERSED
-                                 ? DualWheelMapper::REVERSED_SENSOR_OFFSET
-                                 : DualWheelMapper::NORMAL_SENSOR_OFFSET;
+      const long upper_off = DualWheelMapper::UPPER_SENSOR_OFFSET_QC;
+      const long lower_off = DualWheelMapper::LOWER_SENSOR_OFFSET_QC;
       m_upper_qc.store(upper_off);
       m_lower_qc.store(lower_off);
       m_upper_sensor_state = SensorState::IDLE; // re-arm for first correction
@@ -177,8 +173,8 @@ int MockFilterWheel::SetPosition(int virtual_slot) {
            "(upper_qc=%ld, lower_qc=%ld)\n",
            virtual_slot, target.upper_qc, target.lower_qc);
 
-    const long upper_off = DualWheelMapper::s_upper_sensor_offset_qc;
-    const long lower_off = DualWheelMapper::s_lower_sensor_offset_qc;
+    const long upper_off = DualWheelMapper::UPPER_SENSOR_OFFSET_QC;
+    const long lower_off = DualWheelMapper::LOWER_SENSOR_OFFSET_QC;
     // Both wheels move simultaneously - mirrors real hardware where each
     // drive runs independently on its own USB connection.
     bool ok_upper = false, ok_lower = false;
