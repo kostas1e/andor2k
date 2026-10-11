@@ -4,6 +4,7 @@
 #include <Definitions.h>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <thread>
 
@@ -342,7 +343,12 @@ void MaxonFilterWheel::poll_sensor(void *handle, unsigned short node_id,
       long current = qc.load();
       // Sensor fires at sensor_offset + N * QC_PER_ROTATION.
       // Snap to the nearest such boundary to remove accumulated drift.
-      long n = (current - sensor_offset) / DualWheelMapper::QC_PER_ROTATION;
+      // Use llround (not integer division) so that a firing position that is
+      // fractionally less than 1.0 rotations past sensor_offset still maps
+      // to N=1, not N=0. Integer division would truncate 0.9923 -> 0 and
+      // compute a ~1-rotation "drift" that falsely invalidates home.
+      long n = std::llround((double)(current - sensor_offset) /
+                            (double)DualWheelMapper::QC_PER_ROTATION);
       long expected = n * DualWheelMapper::QC_PER_ROTATION + sensor_offset;
       long drift = current - expected;
       long abs_drift = drift < 0 ? -drift : drift;
