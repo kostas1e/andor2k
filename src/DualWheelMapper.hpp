@@ -39,6 +39,12 @@ public:
   // Maximum allowable snap correction; larger drift invalidates home.
   static constexpr long MAX_DRIFT_QC = 100000L;
 
+  // Maximum LOW-state QC that can be the inter-pulse gap (< this = gap/RISE2,
+  // > this = long clear space = RISE1). Gap ~1.5-2 * pulse_width << slot.
+  // QC_PER_SLOT / 2 is safe: gap << pulse_width << QC_PER_SLOT / 2.
+  // Refine after measuring pulse and gap widths on real hardware.
+  static constexpr long HOMING_GAP_MAX_QC = QC_PER_SLOT / 2;
+
   // One or both motors may be mounted mirrored, reversing physical slot order
   // under positive velocity (0->5->4->3->2->1 instead of 0->1->2->3->4->5).
   // When true, MapVirtualToPhysical applies a forward-index reversal for that

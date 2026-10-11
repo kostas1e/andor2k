@@ -245,7 +245,7 @@ void MaxonFilterWheel::poll_sensor(void *handle, unsigned short node_id,
   unsigned int di_val = 0, bytes = 0, err = 0;
   VCS_GetObject(handle, node_id, 0x60FD, 0x00, &di_val, sizeof(di_val), &bytes,
                 &err);
-  const bool di1 = (di_val >> 16) & 1u;
+  const bool di1 = (di_val >> 2) & 1u; // bit 2 = CiA 402 home-switch input
   const bool rising = di1 && !di1_prev;
   const bool falling = !di1 && di1_prev;
   di1_prev = di1;
@@ -365,6 +365,55 @@ int MaxonFilterWheel::GoHome() {
   return 0;
 }
 
+bool MaxonFilterWheel::seek_next_rise(
+    void *handle, unsigned short node, std::atomic<long> &qc_ref, int &raw_prev,
+    long &low_qc_before_rise,
+    std::chrono::steady_clock::time_point deadline) noexcept {
+  unsigned int err = 0;
+  int poll_cnt = 0;
+
+  auto read_di1 = [&]() -> bool {
+    unsigned int di_val = 0, bytes = 0;
+    VCS_GetObject(handle, node, 0x60FD, 0x00, &di_val, sizeof(di_val), &bytes,
+                  &err);
+    return (di_val >> 2) & 1u; // bit 2 = CiA 402 home-switch input
+  };
+
+  // Phase 1: if DI1 is HIGH on entry, wait for it to go LOW (exit current
+  // pulse).
+  while (read_di1() && !m_halt_requested.load()) {
+    if (std::chrono::steady_clock::now() > deadline)
+      return false;
+    std::this_thread::sleep_for(5ms);
+    update_qc(qc_ref, raw_prev, handle, node);
+  }
+  if (m_halt_requested.load())
+    return false;
+
+  // Phase 2: DI1 is LOW - measure QC until it goes HIGH (rising edge = RISE1 or
+  // RISE2).
+  long low_start_qc = qc_ref.load();
+  bool prev_di1 = false;
+
+  while (!m_halt_requested.load()) {
+    if (std::chrono::steady_clock::now() > deadline)
+      return false;
+    std::this_thread::sleep_for(5ms);
+    update_qc(qc_ref, raw_prev, handle, node);
+    bool di1 = read_di1();
+    if (++poll_cnt % 200 == 0)
+      printf("[MaxonFilterWheel] node %u: seek_next_rise poll[%d] "
+             "di1=%d low_qc=%ld\n",
+             node, poll_cnt, (int)di1, qc_ref.load() - low_start_qc);
+    if (di1 && !prev_di1) { // rising edge
+      low_qc_before_rise = qc_ref.load() - low_start_qc;
+      return true;
+    }
+    prev_di1 = di1;
+  }
+  return false;
+}
+
 bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
                                       std::atomic<long> &qc_ref,
                                       int &raw_prev_ref,
@@ -410,62 +459,43 @@ bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
          "at %d RPM...\n",
          node, HOMING_VELOCITY_RPM);
 
-  // 2. Read initial DI1 state, then poll until it changes or timeout
-  // Do NOT hardcode initial state: if the sensor is active-low (high at rest),
-  // a hardcoded false would give a spurious "rising edge" on the first poll,
-  // or detect the TRAILING edge of an active-low pulse instead of the leading
-  // one, causing the wheel to overshoot. Detecting ANY change from the real
-  // initial state is polarity-agnostic and stops at the first sensor event.
-  unsigned int di_val_init = 0;
-  {
-    unsigned int bytes_i = 0;
-    if (!VCS_GetObject(handle, node, 0x60FD, 0x00, &di_val_init,
-                       sizeof(di_val_init), &bytes_i, &err))
-      log_epos_error("VCS_GetObject(0x60FD) initial", node, err);
-  }
-  const bool di1_initial = (di_val_init >> 2) & 1u;
-  printf("[MaxonFilterWheel] node %u: home_sw initial = %u  "
-         "(0x60FD raw = 0x%08X)\n",
-         node, (unsigned)di1_initial, di_val_init);
-
-  // Worst-case: wheel at 180 deg from sensor, one full rotation at 3000 RPM
-  // motor ~86 s - use 120 s for margin.
+  // 2. Find RISE1 using seek_next_rise loop
+  // seek_next_rise() returns the QC elapsed in the LOW state before each
+  // rising edge. A long LOW (> HOMING_GAP_MAX_QC) means we came through the
+  // clear space -> confirmed RISE1. A short LOW is the inter-pulse gap or a
+  // start position very close to RISE1 -> retry.
+  //
+  // At most 3 iterations needed from any starting position:
+  //   1 iteration : start in clear space far from RISE1  (common, ~92 %)
+  //   2 iterations: start on PULSE1, PULSE2, or in the gap  (~8 %)
+  //   3 iterations: start within HOMING_GAP_MAX_QC of RISE1 (~0.01 %)
+  static constexpr int MAX_SEEK_ATTEMPTS = 4; // 1 extra for safety
   static constexpr int HOMING_TIMEOUT_MS = 120000;
+  auto deadline = std::chrono::steady_clock::now() +
+                  std::chrono::milliseconds(HOMING_TIMEOUT_MS);
+
   bool found = false;
-  int poll_cnt = 0;
-  auto t_start = std::chrono::steady_clock::now();
-  while (!m_halt_requested.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    unsigned int di_val = 0, bytes = 0;
-    if (!VCS_GetObject(handle, node, 0x60FD, 0x00, &di_val, sizeof(di_val),
-                       &bytes, &err))
-      log_epos_error("VCS_GetObject(0x60FD)", node, err);
-    // Bit 2 of 0x60FD is the CiA 402 home-switch logical input.
-    // EPOS4 routes DI1 to this function; the raw DI1 physical bit (16)
-    // stays 0 even when the sensor fires.
-    const bool home_sw = (di_val >> 2) & 1u;
+  int raw_at_detection = 0;
 
-    // Debug: print DI state every ~500 ms
-    if (++poll_cnt % 100 == 0)
-      printf("[MaxonFilterWheel] node %u: poll[%d] home_sw=%u  0x60FD=0x%08X\n",
-             node, poll_cnt, (unsigned)home_sw, di_val);
+  for (int attempt = 0; attempt < MAX_SEEK_ATTEMPTS; ++attempt) {
+    long low_qc = 0;
+    if (!seek_next_rise(handle, node, qc_ref, raw_prev_ref, low_qc, deadline))
+      break; // halted or timeout
 
-    // Any change from the initial state = sensor event (polarity-agnostic)
-    if (home_sw != di1_initial) {
+    printf(
+        "[MaxonFilterWheel] node %u: attempt %d: low_qc=%ld  threshold=%ld\n",
+        node, attempt, low_qc, DualWheelMapper::HOMING_GAP_MAX_QC);
+
+    if (low_qc > DualWheelMapper::HOMING_GAP_MAX_QC) {
+      // Long clear space before this rising edge -> confirmed RISE1.
+      // Read raw position immediately so we can track the stopping distance.
+      unsigned int err_det = 0;
+      VCS_GetPositionIs(handle, node, &raw_at_detection, &err_det);
       found = true;
       break;
     }
-
-    // Safety timeout
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::steady_clock::now() - t_start)
-                          .count();
-    if (elapsed_ms > HOMING_TIMEOUT_MS) {
-      printf("[MaxonFilterWheel] node %u: homing TIMEOUT (%d ms) - "
-             "sensor never triggered\n",
-             node, HOMING_TIMEOUT_MS);
-      break;
-    }
+    // Short LOW: inter-pulse gap or start within HOMING_GAP_MAX_QC of RISE1.
+    // The motor is now on the next pulse - continue to the next rising edge.
   }
 
   // 3. Stop motor
@@ -484,29 +514,29 @@ bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
     return false;
   }
 
-  // 4. Zero the software accumulator at the sensor position
-  // VCS_FindHome(HM_ACTUAL_POSITION) was supposed to reset the drive's
-  // internal position register, but in practice it silently fails (mode
-  // switch error or timing) and VCS_GetPositionIs returns the large raw
-  // encoder count rather than 0. We don't need the drive to reset: all
-  // slot targets are computed as relative moves against m_upper_qc /
-  // m_lower_qc, so we can just set the accumulator to sensor_offset
-  // directly. This makes the sensor position the definition of QC = 0
-  // (+ any calibrated offset), independent of the drive's internal counter.
+  // 4. Set accumulator, accounting for stopping distance
+  // The motor kept moving after RISE1 was detected (detection latency +
+  // deceleration). Read raw position now and compute the delta so the
+  // accumulator is consistent with raw_prev_ref and no QC are "lost".
   restore_position_mode();
 
-  // Read the actual stopped drive position so that update_qc's first delta
-  // is 0 (not a spurious 24M-QC jump caused by raw_prev_ref=0).
-  int raw_now = 0;
+  int raw_at_stop = 0;
   unsigned int err_rb = 0;
-  VCS_GetPositionIs(handle, node, &raw_now, &err_rb);
+  VCS_GetPositionIs(handle, node, &raw_at_stop, &err_rb);
 
-  qc_ref.store(sensor_offset); // sensor position IS slot 0 (offset = 0)
-  raw_prev_ref = raw_now; // delta baseline matches the drive's current counter
+  int delta_raw = raw_at_stop - raw_at_detection;
+  if (delta_raw > (1 << 30))
+    delta_raw -= (1 << 31); // 32-bit wraparound
+  if (delta_raw < -(1 << 30))
+    delta_raw += (1 << 31);
 
-  printf("[MaxonFilterWheel] node %u: homed at sensor - "
-         "accumulator = %ld QC  drive raw = %d\n",
-         node, sensor_offset, raw_now);
+  qc_ref.store(sensor_offset + (long)delta_raw);
+  raw_prev_ref = raw_at_stop;
+
+  printf("[MaxonFilterWheel] node %u: homed - "
+         "accumulator=%ld QC  (sensor_offset=%ld + stopping_delta=%d)  "
+         "drive_raw=%d\n",
+         node, qc_ref.load(), sensor_offset, delta_raw, raw_at_stop);
   return true;
 }
 

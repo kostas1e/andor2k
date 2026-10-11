@@ -90,10 +90,11 @@ private:
   bool m_lower_di1_prev{false};
 
   // Software homing constants
-  // Motor speed (RPM) used during the forward search for the home sensor.
-  // Fast enough to move reliably; overshoot at 3000 RPM over one 5-ms poll
-  // tick is ~250 QC - well under MAX_DRIFT_QC (100 000 QC).
-  static constexpr int HOMING_VELOCITY_RPM = 3000;
+  // Motor speed used during homing. Must match PROFILE_VELOCITY
+  // (MaxonFilterWheel.cpp) so detection latency is identical for homing and
+  // periodic index correction, keeping NORMAL_SENSOR_OFFSET calibration
+  // consistent.
+  static constexpr int HOMING_VELOCITY_RPM = 6000; // == PROFILE_VELOCITY
 
   // QC value written to the EPOS4 position register (via 0x607C home offset
   // + VCS_FindHome HM_ACTUAL_POSITION) when each wheel's sensor fires.
@@ -150,6 +151,15 @@ private:
   bool home_one_wheel(void *handle, unsigned short node,
                       std::atomic<long> &qc_ref, int &raw_prev_ref,
                       long sensor_offset) noexcept;
+
+  // Move forward (velocity mode already active) until the home sensor fires
+  // (DI1 rising edge, bit 2 of 0x60FD). If DI1 is HIGH on entry, waits for
+  // it to fall first. Returns true on success; fills low_qc_before_rise with
+  // the QC elapsed during the LOW state before this rising edge.
+  bool seek_next_rise(void *handle, unsigned short node,
+                      std::atomic<long> &qc_ref, int &raw_prev,
+                      long &low_qc_before_rise,
+                      std::chrono::steady_clock::time_point deadline) noexcept;
 
   // Read DI1 from the EPOS4 digital inputs object (0x60FD bit 16), detect
   // rising/falling edges, and apply position correction on the first trigger
