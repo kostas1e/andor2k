@@ -232,4 +232,8 @@ long MockFilterWheel::GetLowerQC() const {
   return m_lower_qc.load();
 }
 
+int MockFilterWheel::GetFaultState() const {
+  return 0;
+} // no faults in simulation
+
 } // namespace andor2k

@@ -48,6 +48,7 @@ public:
   // QC monitoring
   long GetUpperQC() const override;
   long GetLowerQC() const override;
+  int  GetFaultState() const override;  // always 0 in simulation
 
 private:
   // Simulated QC positions (accumulate; never reset)

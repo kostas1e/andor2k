@@ -86,6 +86,13 @@ public:
    * @return Current QC value.
    */
   virtual long GetLowerQC() const = 0;
+
+  /**
+   * @brief Query drive fault state.
+   * @return Bitmask: bit 0 = upper drive fault, bit 1 = lower drive fault.
+   *         0 means no faults. Simulation always returns 0.
+   */
+  virtual int GetFaultState() const = 0;
 };
 
 } // namespace andor2k

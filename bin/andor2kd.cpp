@@ -269,12 +269,15 @@ int handle_wheel_command(const char *command, const Socket &socket) noexcept {
 
   // "wheel status" - most frequent; check first
   if (!std::strncmp(command, "wheel status", 12)) {
+    int fault = g_wheel->GetFaultState();
     socket_sprintf(socket, buf,
                    "fconnected:1;fmoving:%d;fpos:%d;"
-                   "fupper_qc:%ld;flower_qc:%ld;fhomed:%d",
+                   "fupper_qc:%ld;flower_qc:%ld;fhomed:%d;"
+                   "fupper_fault:%d;flower_fault:%d",
                    g_wheel->IsMoving() ? 1 : 0, g_wheel->GetPosition(),
                    g_wheel->GetUpperQC(), g_wheel->GetLowerQC(),
-                   g_wheel->IsHomed() ? 1 : 0);
+                   g_wheel->IsHomed() ? 1 : 0, (fault & 1) ? 1 : 0,
+                   (fault & 2) ? 1 : 0);
     return 0;
   }
 

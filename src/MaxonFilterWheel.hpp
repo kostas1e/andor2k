@@ -44,6 +44,7 @@ public:
 
   long GetUpperQC() const override;
   long GetLowerQC() const override;
+  int  GetFaultState() const override;  // bit 0=upper, bit 1=lower
 
 private:
   // EPOS4 device handles - one per physical USB connection (nullptr when

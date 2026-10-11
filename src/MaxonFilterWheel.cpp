@@ -806,6 +806,24 @@ long MaxonFilterWheel::GetLowerQC() const {
   return m_lower_qc.load();
 }
 
+int MaxonFilterWheel::GetFaultState() const {
+  int result = 0;
+  unsigned int err = 0;
+  int is_fault = 0;
+  if (m_handle_upper) {
+    if (VCS_GetFaultState(m_handle_upper, NODE_UPPER, &is_fault, &err) &&
+        is_fault)
+      result |= 1; // bit 0 = upper
+  }
+  is_fault = 0;
+  if (m_handle_lower) {
+    if (VCS_GetFaultState(m_handle_lower, NODE_LOWER, &is_fault, &err) &&
+        is_fault)
+      result |= 2; // bit 1 = lower
+  }
+  return result;
+}
+
 std::vector<std::string> MaxonFilterWheel::GetNames() const {
   return {"Clear",    "Filter 1", "Filter 2", "Filter 3",
           "Filter 4", "Filter 5", "Filter 6", "Filter 7",
