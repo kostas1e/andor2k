@@ -86,109 +86,184 @@ static bool probe_node(void *handle, unsigned short node_id) {
 int MaxonFilterWheel::init_node(void *handle, unsigned short node_id) {
   unsigned int err = 0;
 
-  // Clear any existing faults
+  // Helper: retry a VCS call up to 3x with 200 ms between attempts.
+  // Returns true on success, false if all attempts fail (err holds last code).
+  auto retry = [&](auto fn, const char *name) -> bool {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      if (attempt > 0) {
+        printf("[MaxonFilterWheel] node %u: %s retry %d/2\n", node_id, name,
+               attempt);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      }
+      if (fn())
+        return true;
+    }
+    log_epos_error(name, node_id, err);
+    return false;
+  };
+
+  // 0. Clear any existing faults
+  // After an abrupt process kill the EPOS4 serial stack needs time to settle;
+  // each state transition (FAULT->DISABLED->ENABLED->MODE) requires a pause.
   int fault = 0;
   VCS_GetFaultState(handle, node_id, &fault, &err);
-  if (fault)
-    VCS_ClearFault(handle, node_id, &err);
-
-  if (!VCS_SetEnableState(handle, node_id, &err)) {
-    printf("[MaxonFilterWheel] SetEnableState failed (node %u, err %u)\n",
-           node_id, err);
-    return 1;
+  if (fault) {
+    printf("[MaxonFilterWheel] node %u: clearing fault in init_node\n",
+           node_id);
+    if (!retry([&] { return VCS_ClearFault(handle, node_id, &err) != 0; },
+               "VCS_ClearFault"))
+      return 1;
+    // FAULT -> SWITCH ON DISABLED: give state machine time to settle.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
-  if (!VCS_ActivateProfilePositionMode(handle, node_id, &err)) {
-    printf("[MaxonFilterWheel] ActivateProfilePositionMode failed "
-           "(node %u, err %u)\n",
-           node_id, err);
+  // 1. Enable drive
+  if (!retry([&] { return VCS_SetEnableState(handle, node_id, &err) != 0; },
+             "VCS_SetEnableState"))
     return 1;
-  }
+  // SWITCH ON DISABLED -> OPERATION ENABLED: settle before mode switch.
+  // After an abrupt SIGKILL the EPOS4 USB stack can take up to ~1 s to
+  // re-stabilise; 200 ms is enough for a clean restart but not after a crash.
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
 
-  if (!VCS_SetPositionProfile(handle, node_id, PROFILE_VELOCITY,
-                              PROFILE_ACCELERATION, PROFILE_DECELERATION,
-                              &err)) {
-    printf("[MaxonFilterWheel] SetPositionProfile failed (node %u, err %u)\n",
-           node_id, err);
+  // 2. Set profile position mode
+  if (!retry(
+          [&] {
+            return VCS_ActivateProfilePositionMode(handle, node_id, &err) != 0;
+          },
+          "VCS_ActivateProfilePositionMode"))
     return 1;
-  }
+
+  // 3. Configure motion profile
+  if (!retry(
+          [&] {
+            return VCS_SetPositionProfile(handle, node_id, PROFILE_VELOCITY,
+                                          PROFILE_ACCELERATION,
+                                          PROFILE_DECELERATION, &err) != 0;
+          },
+          "VCS_SetPositionProfile"))
+    return 1;
 
   return 0;
 }
 
 int MaxonFilterWheel::Connect() {
-  // Scan USB0..USB3 and identify each drive by its node ID, NOT by port order.
-  // The upper drive must be configured with NODE_UPPER (1) in EPOS Studio;
-  // the lower with NODE_LOWER (2). Non-EPOS USB devices are silently skipped
-  // because probe_node() will fail for them.
+  // 3 total attempts with capped exponential backoff.
+  // delay(attempt) = min(RETRY_DELAY_CAP_MS, RETRY_DELAY_BASE_MS <<
+  // (attempt-1))
+  //   attempt 1->2: min(4000, 2000*1) = 2000 ms
+  //   attempt 2->3: min(4000, 2000*2) = 4000 ms
+  // Scaling with MAX_ATTEMPTS is automatic - no parallel array to maintain.
+  //
+  // Handles that are successfully opened are KEPT between attempts so that
+  // a drive that responded on attempt 1 is never closed and re-probed.
+  // Only the still-missing drive is scanned for on subsequent attempts.
+  // Pointer equality on port strings is safe: all pointers come from the
+  // same stack array so the addresses are unique per entry.
+  static constexpr int MAX_ATTEMPTS = 3;
+  static constexpr int RETRY_DELAY_BASE_MS = 2000;
+  static constexpr int RETRY_DELAY_CAP_MS = 4000;
+
   unsigned int err = 0;
   const char *ports[] = {"USB0", "USB1", "USB2", "USB3"};
+  const char *upper_port =
+      nullptr; // port whose handle is stored in m_handle_upper
+  const char *lower_port =
+      nullptr; // port whose handle is stored in m_handle_lower
 
-  for (const char *port : ports) {
+  for (int attempt = 1; attempt <= MAX_ATTEMPTS; ++attempt) {
+    if (attempt > 1) {
+      int delay = std::min(RETRY_DELAY_CAP_MS,
+                           RETRY_DELAY_BASE_MS * (1 << (attempt - 2)));
+      printf("[MaxonFilterWheel] Attempt %d/%d: upper=%s lower=%s - "
+             "waiting %d ms before retry\n",
+             attempt - 1, MAX_ATTEMPTS, m_handle_upper ? "found" : "MISSING",
+             m_handle_lower ? "found" : "MISSING", delay);
+      std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    }
+
+    for (const char *port : ports) {
+      if (m_handle_upper && m_handle_lower)
+        break;
+      // Skip ports that already have an open handle - re-opening them would
+      // either fail (device busy) or produce a duplicate handle.
+      if (port == upper_port || port == lower_port)
+        continue;
+
+      void *h = try_open_epos4(port, &err);
+      if (!h)
+        continue;
+
+      if (!m_handle_upper && probe_node(h, NODE_UPPER)) {
+        m_handle_upper = h;
+        upper_port = port;
+        printf(
+            "[MaxonFilterWheel] Attempt %d/%d: upper wheel (node %u) on %s\n",
+            attempt, MAX_ATTEMPTS, NODE_UPPER, port);
+      } else if (!m_handle_lower && probe_node(h, NODE_LOWER)) {
+        m_handle_lower = h;
+        lower_port = port;
+        printf(
+            "[MaxonFilterWheel] Attempt %d/%d: lower wheel (node %u) on %s\n",
+            attempt, MAX_ATTEMPTS, NODE_LOWER, port);
+      } else {
+        // Neither expected node responded. Scan nodes 1-14 to diagnose
+        // wrong DIP-switch settings without requiring EPOS Studio.
+        printf("[MaxonFilterWheel] Device on %s did not answer node %u or %u - "
+               "scanning for its actual node ID...\n",
+               port, NODE_UPPER, NODE_LOWER);
+        bool found_any = false;
+        for (unsigned short n = 1; n <= 14; ++n) {
+          if (probe_node(h, n)) {
+            printf("[MaxonFilterWheel] -> %s answers to node %u "
+                   "(expected %u or %u)\n",
+                   port, n, NODE_UPPER, NODE_LOWER);
+            found_any = true;
+          }
+        }
+        if (!found_any)
+          printf("[MaxonFilterWheel] -> no node 1-14 responded on %s\n", port);
+        VCS_CloseDevice(h, &err);
+      }
+    }
+
     if (m_handle_upper && m_handle_lower)
       break;
 
-    void *h = try_open_epos4(port, &err);
-    if (!h)
-      continue;
+    if (!m_handle_upper)
+      printf(
+          "[MaxonFilterWheel] Attempt %d/%d: upper wheel (node %u) NOT found\n",
+          attempt, MAX_ATTEMPTS, NODE_UPPER);
+    if (!m_handle_lower)
+      printf(
+          "[MaxonFilterWheel] Attempt %d/%d: lower wheel (node %u) NOT found\n",
+          attempt, MAX_ATTEMPTS, NODE_LOWER);
+  }
 
-    if (!m_handle_upper && probe_node(h, NODE_UPPER)) {
-      m_handle_upper = h;
-      printf("[MaxonFilterWheel] Upper wheel (node %u) on %s\n", NODE_UPPER,
-             port);
-    } else if (!m_handle_lower && probe_node(h, NODE_LOWER)) {
-      m_handle_lower = h;
-      printf("[MaxonFilterWheel] Lower wheel (node %u) on %s\n", NODE_LOWER,
-             port);
-    } else {
-      // Neither expected node responded. Scan nodes 1-14 to show which
-      // node ID the device actually has (helps diagnose DIP-switch issues).
-      printf("[MaxonFilterWheel] Device on %s did not answer node %u or %u - "
-             "scanning for its actual node ID...\n",
-             port, NODE_UPPER, NODE_LOWER);
-      bool found_any = false;
-      for (unsigned short n = 1; n <= 14; ++n) {
-        if (probe_node(h, n)) {
-          printf("[MaxonFilterWheel]   -> %s answers to node %u "
-                 "(expected %u or %u)\n",
-                 port, n, NODE_UPPER, NODE_LOWER);
-          found_any = true;
-        }
-      }
-      if (!found_any)
-        printf("[MaxonFilterWheel]   -> no node 1-14 responded on %s "
-               "(drive may be off or in error)\n",
-               port);
-      VCS_CloseDevice(h, &err);
+  if (!m_handle_upper || !m_handle_lower) {
+    // Close any handle that was found before giving up.
+    if (m_handle_upper) {
+      VCS_CloseDevice(m_handle_upper, &err);
+      m_handle_upper = nullptr;
     }
-  }
-
-  if (!m_handle_upper) {
-    printf("[MaxonFilterWheel] WARNING: Upper wheel (node %u) not found; "
-           "GoHome/SetPosition will be unavailable\n",
-           NODE_UPPER);
-  }
-  if (!m_handle_lower) {
-    printf("[MaxonFilterWheel] WARNING: Lower wheel (node %u) not found; "
-           "GoHome/SetPosition will be unavailable\n",
-           NODE_LOWER);
-  }
-  if (!m_handle_upper && !m_handle_lower) {
-    printf("[MaxonFilterWheel] ERROR: No drives found\n");
+    if (m_handle_lower) {
+      VCS_CloseDevice(m_handle_lower, &err);
+      m_handle_lower = nullptr;
+    }
+    printf("[MaxonFilterWheel] ERROR: Could not connect to both drives after "
+           "%d attempts - check USB cables, power, and node-ID DIP switches\n",
+           MAX_ATTEMPTS);
     return 1;
   }
 
-  // Guard: only init wheels that were actually found. Calling init_node()
-  // with a null handle causes VCS_* to crash with an invalid-handle error.
-  if (m_handle_upper && init_node(m_handle_upper, NODE_UPPER) != 0) {
+  if (init_node(m_handle_upper, NODE_UPPER) != 0) {
     Disconnect();
     return 2;
   }
-  if (m_handle_lower && init_node(m_handle_lower, NODE_LOWER) != 0) {
+  if (init_node(m_handle_lower, NODE_LOWER) != 0) {
     Disconnect();
     return 3;
   }
-
   printf("[MaxonFilterWheel] Connected; both nodes initialised\n");
   return 0;
 }
@@ -451,7 +526,21 @@ bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
   VCS_GetFaultState(handle, node, &fault, &err);
   if (fault) {
     printf("[MaxonFilterWheel] node %u: clearing fault before homing\n", node);
-    if (!VCS_ClearFault(handle, node, &err)) {
+    // After a halted motion the drive may be mid-state-transition; retry
+    // VCS_ClearFault up to 3 times (200 ms apart) before giving up.
+    bool cleared = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      if (attempt > 0) {
+        printf("[MaxonFilterWheel] node %u: VCS_ClearFault retry %d/2\n", node,
+               attempt);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      }
+      if (VCS_ClearFault(handle, node, &err)) {
+        cleared = true;
+        break;
+      }
+    }
+    if (!cleared) {
       log_epos_error("VCS_ClearFault", node, err);
       return false;
     }

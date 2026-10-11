@@ -504,12 +504,13 @@ int main() {
 #endif
   if (g_wheel->Connect() != 0) {
     fprintf(stderr,
-            "[WRNNG][%s] Filter wheel Connect() failed; "
-            "wheel commands will return errors\n",
+            "[FATAL][%s] Filter wheel Connect() failed after retries - "
+            "both EPOS4 drives must be present and powered.\n"
+            "        Check USB cables, power, and node-ID DIP switches.\n",
             date_str(now_str));
-  } else {
-    printf("[DEBUG][%s] Filter wheel ready\n", date_str(now_str));
+    return 10;
   }
+  printf("[DEBUG][%s] Filter wheel ready\n", date_str(now_str));
 
   // cool down if needed RUN
   if (cool_to_temperature(INTITIALIZE_TO_TEMP)) {
