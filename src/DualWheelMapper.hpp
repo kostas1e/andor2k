@@ -78,10 +78,14 @@ public:
   static constexpr long MAX_DRIFT_QC = 100000L;
 
   // Maximum LOW-state QC that can be the inter-pulse gap (< this = gap/RISE2,
-  // > this = long clear space = RISE1). Gap ~1.5-2 * pulse_width << slot.
-  // QC_PER_SLOT / 2 is safe: gap << pulse_width << QC_PER_SLOT / 2.
-  // Refine after measuring pulse and gap widths on real hardware.
-  static constexpr long HOMING_GAP_MAX_QC = QC_PER_SLOT / 2;
+  // > this = long clear space = RISE1).
+  // Measured 2026-07-06 at 3000 RPM:
+  //   Upper (node 1) inter-pulse gap: 173 244 QC (Tab2->gap->Tab1 in upper
+  //   dir) Lower (node 2) inter-pulse gap: 182 031 QC (Tab1->gap->Tab2 in
+  //   lower dir) Upper clear space: 8 155 146 QC (Tab1+Tab2 combined = 448 422
+  //   QC) Lower clear space: 8 230 171 QC (Tab1+Tab2 combined = 373 397 QC)
+  // Threshold set to 400 000 QC: > 2* largest gap, well below clear space.
+  static constexpr long HOMING_GAP_MAX_QC = 400000L;
 
   // Arrival tolerance for slot positioning. If the wheel stops within this
   // many QC of a slot center (in either direction) the position is accepted
