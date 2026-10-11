@@ -54,7 +54,8 @@ pkginclude_HEADERS = \
 	acquisition_reporter.hpp \
 	acquisition_series_reporter.hpp \
 	cbase64.hpp \
-	IFilterWheel.hpp
+	IFilterWheel.hpp \
+	DualWheelMapper.hpp
 
 ##
 ##  Source files (distributed).
@@ -88,4 +89,5 @@ dist_libhelmosandor2k_la_SOURCES = \
     get_single_scan.cpp \
     get_rta_scan.cpp \
 	abort_listener.cpp \
-	save_as_fits.cpp
+	save_as_fits.cpp \
+	DualWheelMapper.cpp
