@@ -1,6 +1,8 @@
 #ifndef __DUALWHEELMAPPER_HPP__
 #define __DUALWHEELMAPPER_HPP__
 
+#include "WheelConfig.hpp"
+
 namespace andor2k {
 
 /**
@@ -29,12 +31,12 @@ public:
 
   // DIRECTION CONVENTION (defined from positive motor velocity):
   //
-  //   Lower wheel (Node 2) positive velocity -> QC+ -> slots:
+  //   Lower wheel (Node 2) positive velocity -> QC^ -> slots:
   //   Clear->6->7->8->9->10
   //                         This is the REFERENCE direction.
   //                         LOWER_WHEEL_REVERSED = false.
   //
-  //   Upper wheel (Node 1) positive velocity -> QC+ -> slots:
+  //   Upper wheel (Node 1) positive velocity -> QC^ -> slots:
   //   Clear->5->4->3->2->1
   //                         Opposite physical direction to lower.
   //                         UPPER_WHEEL_REVERSED = true.
@@ -105,6 +107,26 @@ public:
       true; // positive V -> slots Clear->5->4->3->2->1
   static constexpr bool LOWER_WHEEL_REVERSED =
       false; // positive V -> slots Clear->6->7->8->9->10
+
+  // Runtime-overridable shadow variables
+  // Initialized from the constexpr defaults (see DualWheelMapper.cpp).
+  // Updated by configure(). All motion and sensor computations read from
+  // these, so a configure() call takes effect at the very next computation.
+  // On x86-64 aligned long reads are atomic; writes from configure() must
+  // happen only while both wheels are idle.
+  static long s_qc_per_rotation;
+  static long s_qc_per_slot; // always = s_qc_per_rotation / SLOTS_PER_WHEEL
+  static long s_lower_sensor_offset_qc;
+  static long s_upper_sensor_offset_qc;
+  static long s_max_drift_qc;
+  static long s_slot_tolerance_qc;
+  static long s_homing_gap_max_qc;
+
+  /// Apply calibration constants from a WheelConfig.
+  /// Recomputes s_qc_per_slot = cfg.qc_per_rotation / SLOTS_PER_WHEEL.
+  /// Call before Connect() for initial setup, or again (wheels idle) for
+  /// a live update (e.g. after "wheel reload" daemon command).
+  static void configure(const WheelConfig &cfg);
   struct PhysicalTarget {
     int upper_slot;
     int lower_slot;

@@ -44,7 +44,14 @@ public:
 
   long GetUpperQC() const override;
   long GetLowerQC() const override;
-  int  GetFaultState() const override;  // bit 0=upper, bit 1=lower
+  int GetFaultState() const override; // bit 0=upper, bit 1=lower
+
+  /// Apply calibration and motion-profile constants from a WheelConfig.
+  /// Updates the physics constants in DualWheelMapper and the local motion
+  /// profile. If already connected, re-programs the EPOS4 position profile
+  /// on both drives immediately (without disconnect).
+  /// Must be called only when wheels are idle (IsMoving() == false).
+  void configure(const WheelConfig &cfg);
 
 private:
   // EPOS4 device handles - one per physical USB connection (nullptr when
@@ -100,14 +107,17 @@ private:
   //         Software homes on the FIRST rising edge seen going forward.
   //         If the wrong trigger is caught, add QC_PER_ROTATION / 2
   //         (~4 303 284 QC) to each offset.
-  //   These constants will be exported to a config file in a later revision.
-  // Per-wheel sensor offsets - reference the independently-calibrated constants
-  // in DualWheelMapper. Do NOT derive one from the other (see
-  // DualWheelMapper.hpp).
-  static constexpr long UPPER_HOMING_SENSOR_OFFSET_QC =
-      DualWheelMapper::UPPER_SENSOR_OFFSET_QC;
-  static constexpr long LOWER_HOMING_SENSOR_OFFSET_QC =
-      DualWheelMapper::LOWER_SENSOR_OFFSET_QC;
+  //   Values are loaded from wheel.conf at startup; defaults live in
+  //   DualWheelMapper::s_upper/lower_sensor_offset_qc.
+  // Per-wheel sensor offsets are accessed at runtime via
+  // DualWheelMapper::s_upper_sensor_offset_qc / s_lower_sensor_offset_qc.
+
+  // Motion profile (instance variables, applied via configure())
+  // Initial values match the compiled defaults; overridden by WheelConfig.
+  unsigned int m_profile_velocity = 4000;      // rpm - slot-to-slot moves
+  unsigned int m_homing_velocity = 4000;       // rpm - homing search run
+  unsigned int m_profile_acceleration = 10000; // rpm/s
+  unsigned int m_profile_deceleration = 15000; // rpm/s
 
   std::atomic<int> m_pos{-1};
   std::atomic<bool> m_moving{false};

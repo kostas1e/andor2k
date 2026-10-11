@@ -88,13 +88,17 @@ private:
   // Simulate traveling from current QC to target, stepping in SIM_QC_STEP
   // increments. Applies sensor-based index correction when a rotation boundary
   // is crossed. Returns true if target reached, false if halted.
+  // node_id: 1 = upper wheel, 2 = lower wheel (used in log output).
   bool simulate_travel(std::atomic<long> &qc, SensorState &sensor_state,
-                       long target_qc, long sensor_offset, int step_us = 5000);
+                       long target_qc, long sensor_offset,
+                       unsigned short node_id, int step_us = 5000);
 
   // Called each step to advance the sensor state machine and apply position
   // correction when the first trigger of a double-pulse pair is detected.
-  void check_sensor(std::atomic<long> &qc, SensorState &state, long prev_qc,
-                    long next_qc, long sensor_offset);
+  // node_id: 1 = upper wheel, 2 = lower wheel (used in log output).
+  void check_sensor(std::atomic<long> &qc, SensorState &state,
+                    long prev_qc, long next_qc,
+                    long sensor_offset, unsigned short node_id);
 };
 
 } // namespace andor2k

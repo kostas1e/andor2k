@@ -12,6 +12,7 @@
 #else
 #include "MaxonFilterWheel.hpp"
 #endif
+#include "WheelConfig.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -41,6 +42,22 @@ extern int abort_exposure_set;
 //   --enable-mock-wheel -> MockFilterWheel (no hardware)
 //   (default)           -> MaxonFilterWheel (EPOS4 via USB)
 andor2k::IFilterWheel *g_wheel = nullptr;
+
+// Global wheel calibration/motion-profile config.
+// Populated only when daemon is started with --wheel-config /path/to/wheel.conf.
+// Without the flag, compiled-in defaults in DualWheelMapper.hpp apply.
+static andor2k::WheelConfig g_cfg;
+static const char *g_config_path =
+    nullptr; // nullptr = no config file (use hardcoded defaults)
+
+/// Apply a loaded WheelConfig to DualWheelMapper physics constants and
+/// to the wheel driver's motion profile. Safe to call before or after
+/// Connect(); must be called only when wheels are idle.
+static void apply_wheel_config(const andor2k::WheelConfig &cfg) {
+  andor2k::DualWheelMapper::configure(cfg);
+  if (g_wheel)
+    g_wheel->configure(cfg);
+}
 
 // buffers and constants for socket communication
 constexpr int INTITIALIZE_TO_TEMP = -50;
@@ -321,6 +338,30 @@ int handle_wheel_command(const char *command, const Socket &socket) noexcept {
     return err;
   }
 
+  if (!std::strncmp(command, "wheel reload", 12)) {
+    if (g_wheel->IsMoving()) {
+      socket_sprintf(socket, buf, "done;error:3;status:busy;");
+      return 3;
+    }
+    if (!g_config_path) {
+      // Daemon was started without --wheel-config; reloading is a no-op.
+      // Return error:2 so the caller knows no file is in effect.
+      socket_sprintf(socket, buf,
+                     "done;error:2;status:no config file (start with --wheel-config "
+                     "PATH to enable reload);");
+      return 2;
+    }
+    bool ok = g_cfg.load(g_config_path);
+    if (!ok) {
+      socket_sprintf(socket, buf, "done;error:4;status:config file not found;");
+      return 4;
+    }
+    apply_wheel_config(g_cfg);
+    g_cfg.print("WheelConfig after reload");
+    socket_sprintf(socket, buf, "done;error:0;");
+    return 0;
+  }
+
   if (!std::strncmp(command, "wheel setpos", 12)) {
     char *end;
     int slot = static_cast<int>(std::strtol(command + 12, &end, 10));
@@ -434,7 +475,20 @@ int chat(const Socket &socket, AndorParameters &params) {
   return -1;
 }
 
-int main() {
+int main(int argc, char **argv) {
+  // Parse optional --wheel-config /path/to/wheel.conf flag.
+  // Without it: compiled-in defaults are used; no file is read.
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--wheel-config") == 0 && i + 1 < argc) {
+      g_config_path = argv[++i];
+    } else {
+      fprintf(stderr,
+              "[FATAL] Unknown argument: %s\n"
+              "Usage: andor2kd [--wheel-config /path/to/wheel.conf]\n",
+              argv[i]);
+      return 1;
+    }
+  }
   int sock_status;
   unsigned int error;
 
@@ -505,6 +559,19 @@ int main() {
 #else
   g_wheel = new andor2k::MaxonFilterWheel();
 #endif
+
+  // Load wheel config if --wheel-config was given; otherwise use compiled-in defaults
+  // silently.
+  if (g_config_path) {
+    if (!g_cfg.load(g_config_path)) {
+      fprintf(stderr, "[FATAL][%s] --wheel-config: file not found: %s\n",
+              date_str(now_str), g_config_path);
+      return 1;
+    }
+    apply_wheel_config(g_cfg);
+    g_cfg.print("WheelConfig");
+  }
+
   if (g_wheel->Connect() != 0) {
     fprintf(stderr,
             "[FATAL][%s] Filter wheel Connect() failed after retries - "

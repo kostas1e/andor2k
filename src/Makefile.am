@@ -55,7 +55,8 @@ pkginclude_HEADERS = \
 	acquisition_series_reporter.hpp \
 	cbase64.hpp \
 	IFilterWheel.hpp \
-	DualWheelMapper.hpp
+	DualWheelMapper.hpp \
+	WheelConfig.hpp
 
 if MOCK_WHEEL
 pkginclude_HEADERS += MockFilterWheel.hpp
@@ -96,7 +97,8 @@ dist_libhelmosandor2k_la_SOURCES = \
     get_rta_scan.cpp \
 	abort_listener.cpp \
 	save_as_fits.cpp \
-	DualWheelMapper.cpp
+	DualWheelMapper.cpp \
+	WheelConfig.cpp
 
 if MOCK_WHEEL
 dist_libhelmosandor2k_la_SOURCES += MockFilterWheel.cpp

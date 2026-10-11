@@ -1,6 +1,8 @@
 #ifndef __IFILTERWHEEL_HPP__
 #define __IFILTERWHEEL_HPP__
 
+#include "WheelConfig.hpp"
+
 #include <string>
 #include <vector>
 
@@ -93,6 +95,20 @@ public:
    *         0 means no faults. Simulation always returns 0.
    */
   virtual int GetFaultState() const = 0;
+
+  /**
+   * @brief Apply calibration and motion-profile constants from a WheelConfig.
+   *
+   * Default no-op for implementations that do not support runtime
+   * reconfiguration (e.g. MockFilterWheel). MaxonFilterWheel overrides this
+   * to reprogramme the EPOS4 position profile.
+   *
+   * Note: physics constants (DualWheelMapper::s_*) are always updated by the
+   * caller (andor2kd apply_wheel_config()) before this is called.
+   */
+  virtual void configure(const WheelConfig &cfg) {
+    (void)cfg;
+  }
 };
 
 } // namespace andor2k

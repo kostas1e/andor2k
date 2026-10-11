@@ -20,17 +20,6 @@ using namespace std::chrono_literals;
 
 namespace andor2k {
 
-// Profile position parameters (tune after hardware testing)
-static constexpr unsigned int PROFILE_VELOCITY =
-    6000; // rpm  (slot-to-slot moves)
-static constexpr unsigned int HOMING_VELOCITY =
-    4000; // rpm  (homing only - measured stopping_delta ~13 k QC at 3000 RPM /
-          // 15k decel; expect ~23 k at 4000 RPM)
-static constexpr unsigned int PROFILE_ACCELERATION = 10000; // rpm/s
-static constexpr unsigned int PROFILE_DECELERATION =
-    15000; // rpm/s  (asymmetric: faster stop -> shorter stopping_delta after
-           // RISE1)
-
 // Decode an EposCmd error code to a human-readable string and print it.
 // VCS_GetErrorInfo(code, buf, maxLen) fills buf with the description.
 static void log_epos_error(const char *fn, unsigned short node,
@@ -46,6 +35,31 @@ MaxonFilterWheel::MaxonFilterWheel() = default;
 MaxonFilterWheel::~MaxonFilterWheel() {
   join_worker();
   Disconnect();
+}
+
+void MaxonFilterWheel::configure(const WheelConfig &cfg) {
+  // Update motion profile (init_node() will pick these up on the next call;
+  // re-program EPOS4 immediately if already connected).
+  // Note: physics constants (DualWheelMapper::s_*) are updated by the caller
+  // (andor2kd) via DualWheelMapper::configure() before calling this function.
+  m_profile_velocity = cfg.profile_velocity;
+  m_homing_velocity = cfg.homing_velocity;
+  m_profile_acceleration = cfg.profile_acceleration;
+  m_profile_deceleration = cfg.profile_deceleration;
+
+  if (!m_handle_upper || !m_handle_lower)
+    return; // not connected - changes take effect on next Connect()
+
+  unsigned int err = 0;
+  if (!VCS_SetPositionProfile(m_handle_upper, NODE_UPPER, m_profile_velocity,
+                              m_profile_acceleration, m_profile_deceleration,
+                              &err))
+    log_epos_error("VCS_SetPositionProfile(reload upper)", NODE_UPPER, err);
+  err = 0;
+  if (!VCS_SetPositionProfile(m_handle_lower, NODE_LOWER, m_profile_velocity,
+                              m_profile_acceleration, m_profile_deceleration,
+                              &err))
+    log_epos_error("VCS_SetPositionProfile(reload lower)", NODE_LOWER, err);
 }
 
 void MaxonFilterWheel::join_worker() {
@@ -144,9 +158,9 @@ int MaxonFilterWheel::init_node(void *handle, unsigned short node_id) {
   // 3. Configure motion profile
   if (!retry(
           [&] {
-            return VCS_SetPositionProfile(handle, node_id, PROFILE_VELOCITY,
-                                          PROFILE_ACCELERATION,
-                                          PROFILE_DECELERATION, &err) != 0;
+            return VCS_SetPositionProfile(handle, node_id, m_profile_velocity,
+                                          m_profile_acceleration,
+                                          m_profile_deceleration, &err) != 0;
           },
           "VCS_SetPositionProfile"))
     return 1;
@@ -348,14 +362,14 @@ void MaxonFilterWheel::poll_sensor(void *handle, unsigned short node_id,
       // to N=1, not N=0. Integer division would truncate 0.9923 -> 0 and
       // compute a ~1-rotation "drift" that falsely invalidates home.
       long n = std::llround((double)(current - sensor_offset) /
-                            (double)DualWheelMapper::QC_PER_ROTATION);
-      long expected = n * DualWheelMapper::QC_PER_ROTATION + sensor_offset;
+                            (double)DualWheelMapper::s_qc_per_rotation);
+      long expected = n * DualWheelMapper::s_qc_per_rotation + sensor_offset;
       long drift = current - expected;
       long abs_drift = drift < 0 ? -drift : drift;
-      printf("[MaxonFilterWheel] DI1\u2191 node %u: QC %ld \u2192 %ld (drift "
+      printf("[MaxonFilterWheel] DI1^ node %u: QC %ld -> %ld (drift "
              "%+ld QC)\n",
              node_id, current, expected, drift);
-      if (abs_drift < DualWheelMapper::MAX_DRIFT_QC) {
+      if (abs_drift < DualWheelMapper::s_max_drift_qc) {
         qc.store(expected);
       } else {
         printf("[MaxonFilterWheel] WARNING node %u: drift %ld QC exceeds "
@@ -368,23 +382,21 @@ void MaxonFilterWheel::poll_sensor(void *handle, unsigned short node_id,
     break;
   case SensorState::FIRST_PULSE:
     if (falling) {
-      printf("[MaxonFilterWheel] DI1\u2193 node %u: first pulse ended\n",
-             node_id);
+      printf("[MaxonFilterWheel] DI1v node %u: first pulse ended\n", node_id);
       state = SensorState::GAP;
     }
     break;
   case SensorState::GAP:
     if (rising) {
-      printf("[MaxonFilterWheel] DI1\u2191 node %u: second pulse (ignored)\n",
+      printf("[MaxonFilterWheel] DI1^ node %u: second pulse (ignored)\n",
              node_id);
       state = SensorState::SECOND_PULSE;
     }
     break;
   case SensorState::SECOND_PULSE:
     if (falling) {
-      printf(
-          "[MaxonFilterWheel] DI1\u2193 node %u: second pulse ended - armed\n",
-          node_id);
+      printf("[MaxonFilterWheel] DI1v node %u: second pulse ended - armed\n",
+             node_id);
       state = SensorState::IDLE;
     }
     break;
@@ -411,12 +423,13 @@ int MaxonFilterWheel::GoHome() {
     // joining the lower thread, so its DI1 poll loop exits immediately rather
     // than spinning until the sensor fires or the 60-second daemon timeout.
     std::thread lower_thread([&]() {
-      lower_ok =
-          home_one_wheel(m_handle_lower, NODE_LOWER, m_lower_qc,
-                         m_lower_raw_prev, LOWER_HOMING_SENSOR_OFFSET_QC);
+      lower_ok = home_one_wheel(m_handle_lower, NODE_LOWER, m_lower_qc,
+                                m_lower_raw_prev,
+                                DualWheelMapper::s_lower_sensor_offset_qc);
     });
-    upper_ok = home_one_wheel(m_handle_upper, NODE_UPPER, m_upper_qc,
-                              m_upper_raw_prev, UPPER_HOMING_SENSOR_OFFSET_QC);
+    upper_ok =
+        home_one_wheel(m_handle_upper, NODE_UPPER, m_upper_qc, m_upper_raw_prev,
+                       DualWheelMapper::s_upper_sensor_offset_qc);
 
     // If upper failed (and it wasn't a user halt), cancel the lower thread.
     bool auto_halted = false;
@@ -589,18 +602,18 @@ bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
     log_epos_error("VCS_ActivateProfileVelocityMode", node, err);
     return false;
   }
-  if (!VCS_SetVelocityProfile(handle, node, PROFILE_ACCELERATION,
-                              PROFILE_DECELERATION, &err)) {
+  if (!VCS_SetVelocityProfile(handle, node, m_profile_acceleration,
+                              m_profile_deceleration, &err)) {
     log_epos_error("VCS_SetVelocityProfile", node, err);
     return false;
   }
-  if (!VCS_MoveWithVelocity(handle, node, (long)HOMING_VELOCITY, &err)) {
+  if (!VCS_MoveWithVelocity(handle, node, (long)m_homing_velocity, &err)) {
     log_epos_error("VCS_MoveWithVelocity", node, err);
     return false;
   }
   printf("[MaxonFilterWheel] node %u: searching for home sensor "
          "at %u RPM...\n",
-         node, HOMING_VELOCITY);
+         node, m_homing_velocity);
 
   // 2. Find RISE1 using seek_next_rise loop
   // seek_next_rise() returns the QC elapsed in the LOW state before each
@@ -627,9 +640,9 @@ bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
 
     printf(
         "[MaxonFilterWheel] node %u: attempt %d: low_qc=%ld  threshold=%ld\n",
-        node, attempt, low_qc, DualWheelMapper::HOMING_GAP_MAX_QC);
+        node, attempt, low_qc, DualWheelMapper::s_homing_gap_max_qc);
 
-    if (low_qc > DualWheelMapper::HOMING_GAP_MAX_QC) {
+    if (low_qc > DualWheelMapper::s_homing_gap_max_qc) {
       // Long clear space before this rising edge -> confirmed RISE1.
       // Read raw position immediately so we can track the stopping distance.
       unsigned int err_det = 0;
@@ -647,8 +660,9 @@ bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
 
   auto restore_position_mode = [&]() {
     VCS_ActivateProfilePositionMode(handle, node, &err);
-    VCS_SetPositionProfile(handle, node, PROFILE_VELOCITY, PROFILE_ACCELERATION,
-                           PROFILE_DECELERATION, &err);
+    VCS_SetPositionProfile(handle, node, m_profile_velocity,
+                           m_profile_acceleration, m_profile_deceleration,
+                           &err);
   };
 
   if (!found || m_halt_requested.load()) {
@@ -750,9 +764,9 @@ int MaxonFilterWheel::SetPosition(int virtual_slot) {
 
       // DI1 sensor: detect index pulse, correct accumulated drift
       poll_sensor(m_handle_upper, NODE_UPPER, m_upper_qc, m_upper_sensor_state,
-                  m_upper_di1_prev, UPPER_HOMING_SENSOR_OFFSET_QC);
+                  m_upper_di1_prev, DualWheelMapper::s_upper_sensor_offset_qc);
       poll_sensor(m_handle_lower, NODE_LOWER, m_lower_qc, m_lower_sensor_state,
-                  m_lower_di1_prev, LOWER_HOMING_SENSOR_OFFSET_QC);
+                  m_lower_di1_prev, DualWheelMapper::s_lower_sensor_offset_qc);
 
       int reached_upper = (delta_upper == 0) ? 1 : 0;
       int reached_lower = (delta_lower == 0) ? 1 : 0;

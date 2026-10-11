@@ -36,14 +36,15 @@ int MockFilterWheel::Disconnect() {
 
 bool MockFilterWheel::simulate_travel(std::atomic<long> &qc,
                                       SensorState &sensor_state, long target_qc,
-                                      long sensor_offset, int step_us) {
+                                      long sensor_offset,
+                                      unsigned short node_id, int step_us) {
   while (qc.load() < target_qc) {
     if (m_halt_requested.load())
       return false;
     long prev_qc = qc.load();
     long next_qc = std::min(prev_qc + SIM_QC_STEP, target_qc);
     qc.store(next_qc);
-    check_sensor(qc, sensor_state, prev_qc, next_qc, sensor_offset);
+    check_sensor(qc, sensor_state, prev_qc, next_qc, sensor_offset, node_id);
     std::this_thread::sleep_for(std::chrono::microseconds(step_us));
   }
   return true;
@@ -56,28 +57,28 @@ bool MockFilterWheel::simulate_travel(std::atomic<long> &qc,
 // tracked and silently discarded.
 void MockFilterWheel::check_sensor(std::atomic<long> &qc, SensorState &state,
                                    long prev_qc, long next_qc,
-                                   long sensor_offset) {
+                                   long sensor_offset, unsigned short node_id) {
   switch (state) {
   case SensorState::IDLE: {
     long prev_cycle =
-        (prev_qc - sensor_offset) / DualWheelMapper::QC_PER_ROTATION;
+        (prev_qc - sensor_offset) / DualWheelMapper::s_qc_per_rotation;
     long next_cycle =
-        (next_qc - sensor_offset) / DualWheelMapper::QC_PER_ROTATION;
+        (next_qc - sensor_offset) / DualWheelMapper::s_qc_per_rotation;
     if (next_cycle > prev_cycle) {
       // Crossed a sensor trigger point - snap accumulator to remove drift.
       long expected_qc =
-          next_cycle * DualWheelMapper::QC_PER_ROTATION + sensor_offset;
+          next_cycle * DualWheelMapper::s_qc_per_rotation + sensor_offset;
       long current = qc.load();
       long drift = current - expected_qc; // always >= 0 (forward-only)
-      if (drift < SIM_MAX_DRIFT_QC) {
+      printf("[SIM][MockFilterWheel] DI1\xe2\x86\x91 node %u: QC %ld "
+             "\xe2\x86\x92 %ld (drift %+ld QC)\n",
+             node_id, current, expected_qc, drift);
+      if (drift < DualWheelMapper::s_max_drift_qc) {
         qc.store(expected_qc);
-        printf("[SIM][Sensor] First trigger at cycle %ld: "
-               "corrected %ld -> %ld (drift=%ld QC)\n",
-               next_cycle, current, expected_qc, drift);
       } else {
-        printf("[SIM][Sensor] WARNING cycle %ld: drift %ld QC exceeds "
-               "threshold, home lost\n",
-               next_cycle, drift);
+        printf("[SIM][MockFilterWheel] WARNING node %u: drift %ld QC exceeds "
+               "threshold - home invalidated\n",
+               node_id, drift);
         m_homed.store(false);
       }
       state = SensorState::FIRST_PULSE;
@@ -85,27 +86,24 @@ void MockFilterWheel::check_sensor(std::atomic<long> &qc, SensorState &state,
     break;
   }
   case SensorState::FIRST_PULSE: {
-    long pos = (next_qc - sensor_offset) % DualWheelMapper::QC_PER_ROTATION;
+    long pos = (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
     if (pos >= SIM_SENSOR_PULSE1_QC) {
       state = SensorState::GAP;
-      printf("[SIM][Sensor] First pulse ended -- waiting for second\n");
     }
     break;
   }
   case SensorState::GAP: {
-    long pos = (next_qc - sensor_offset) % DualWheelMapper::QC_PER_ROTATION;
+    long pos = (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
     if (pos >= SIM_SENSOR_PULSE1_QC + SIM_SENSOR_GAP_QC) {
       state = SensorState::SECOND_PULSE;
-      printf("[SIM][Sensor] Second pulse started (ignored)\n");
     }
     break;
   }
   case SensorState::SECOND_PULSE: {
-    long pos = (next_qc - sensor_offset) % DualWheelMapper::QC_PER_ROTATION;
+    long pos = (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
     if (pos >=
         SIM_SENSOR_PULSE1_QC + SIM_SENSOR_GAP_QC + SIM_SENSOR_PULSE2_QC) {
       state = SensorState::IDLE;
-      printf("[SIM][Sensor] Second pulse ended -- sensor armed\n");
     }
     break;
   }
@@ -131,8 +129,8 @@ int MockFilterWheel::GoHome() {
 
     if (!m_halt_requested.load()) {
       // Set accumulators to the per-wheel sensor offset (mirrors real homing).
-      const long upper_off = DualWheelMapper::UPPER_SENSOR_OFFSET_QC;
-      const long lower_off = DualWheelMapper::LOWER_SENSOR_OFFSET_QC;
+      const long upper_off = DualWheelMapper::s_upper_sensor_offset_qc;
+      const long lower_off = DualWheelMapper::s_lower_sensor_offset_qc;
       m_upper_qc.store(upper_off);
       m_lower_qc.store(lower_off);
       m_upper_sensor_state = SensorState::IDLE; // re-arm for first correction
@@ -173,17 +171,17 @@ int MockFilterWheel::SetPosition(int virtual_slot) {
            "(upper_qc=%ld, lower_qc=%ld)\n",
            virtual_slot, target.upper_qc, target.lower_qc);
 
-    const long upper_off = DualWheelMapper::UPPER_SENSOR_OFFSET_QC;
-    const long lower_off = DualWheelMapper::LOWER_SENSOR_OFFSET_QC;
+    const long upper_off = DualWheelMapper::s_upper_sensor_offset_qc;
+    const long lower_off = DualWheelMapper::s_lower_sensor_offset_qc;
     // Both wheels move simultaneously - mirrors real hardware where each
     // drive runs independently on its own USB connection.
     bool ok_upper = false, ok_lower = false;
     std::thread t_lower([&]() {
       ok_lower = simulate_travel(m_lower_qc, m_lower_sensor_state,
-                                 target.lower_qc, lower_off);
+                                 target.lower_qc, lower_off, 2U);
     });
     ok_upper = simulate_travel(m_upper_qc, m_upper_sensor_state,
-                               target.upper_qc, upper_off);
+                               target.upper_qc, upper_off, 1U);
     t_lower.join();
 
     if (ok_upper && ok_lower) {

@@ -1,0 +1,79 @@
+# wheel.conf - Andor2K filter wheel calibration and motion-profile configuration
+# Format: key = value   (integers only; no floating point)
+# Comments: lines starting with # and inline # are ignored.
+# Missing keys keep compiled-in defaults (same values as shown below).
+# Load order: daemon reads this file at startup from the current working
+# directory. Use "wheel reload" daemon command to re-apply without restart.
+
+# Physics: Encoder / rotation geometry
+
+# Primary measurement (QC). Measured via RISE1-to-RISE1 method after homing:
+#   "wheel home", then record fupper_qc (or flower_qc) for two consecutive home
+#   runs. QC_PER_ROTATION = qc_at_RISE1_run2 - qc_at_RISE1_run1.
+# Formula: encoder_CPR * 4 * gear_reduction * (wheel_pulley_D / motor_pulley_D)
+#          = 512 * 4 * 53 * (250/80) = 8 603 200 (design estimate)
+# Measured 2026-07-06: 8 603 568 QC (see commissioning.md section 3).
+qc_per_rotation = 8603568
+
+# Physics: Per-wheel sensor offsets
+# QC accumulated going forward from slot 0 (clear) until RISE1 fires.
+# These are INDEPENDENTLY calibrated - do NOT derive one from the other.
+# Calibration procedure (per wheel):
+#   1. "wheel home"
+#   2. "wheel setpos 0" (move to clear)
+#   3. Inspect physical alignment through the aperture.
+#      Past centre    -> went too far  -> INCREASE this value.
+#      Before centre  -> stopped short -> DECREASE this value.
+# See commissioning.md section 8 for the full per-wheel procedure.
+
+# Lower wheel (Node 2, reference direction: positive velocity -> QC+)
+# v2 calibration 2026-07-06: 3*QC_PER_SLOT - 153 393 = 4 148 391
+lower_sensor_offset_qc = 4148391
+
+# Upper wheel (Node 1, reversed direction: positive velocity -> QC+ but slots go 5->4->3->2->1)
+# v2 calibration 2026-07-06: QC_PER_ROTATION - 3*QC_PER_SLOT - 133 393 = 4 168 391
+upper_sensor_offset_qc = 4168391
+
+# Physics: Drift and tolerance thresholds
+
+# Maximum drift at each sensor crossing before home is invalidated (QC).
+# Must be > worst-case belt overshoot at operating speed.
+# Rule of thumb: 5-10 % of QC_PER_SLOT (= 1 433 928 QC).
+# At 4000 RPM the measured peak drift was < 30 000 QC.
+# Raised to 100 000 QC for comfortable margin.
+max_drift_qc = 100000
+
+# Half-width of the slot arrival window (QC).
+# Wheels stopping within +/-slot_tolerance_qc of a slot centre are accepted
+# without triggering a full extra rotation.
+# Default: QC_PER_SLOT / 10 ~143 392 QC (integer division).
+# Must be << QC_PER_SLOT / 2 so adjacent slot windows never overlap.
+slot_tolerance_qc = 143392
+
+# RISE2/RISE1 discriminator threshold (QC).
+# Sensor LOW-state duration below this = inter-pulse gap (-> RISE2, skip).
+# Above this = long clear space before first flag (-> RISE1, home on this).
+# Measured 2026-07-06 at 3000 RPM:
+#   Upper (node 1) inter-pulse gap: 173 244 QC
+#   Lower (node 2) inter-pulse gap: 182 031 QC
+# Threshold 400 000 QC > 2* largest gap, well below clear space (~8.2M QC).
+homing_gap_max_qc = 400000
+
+# Motion profile (programmed to EPOS4 via VCS_SetPositionProfile)
+# Applied at Connect() and on "wheel reload" (re-programs without disconnect).
+# Values tuned 2026-07-06 for Aristarchos rubber-band drive.
+
+# Slot-to-slot move velocity (rpm). Lower = smoother stop, higher = faster.
+# Tested range: 3000-5000 RPM. 4000 RPM nominal (26 s/slot with 30 mm belt).
+profile_velocity = 4000
+
+# Homing search velocity (rpm). Must be identical to profile_velocity so
+# the stopping_delta formula in commissioning.md stays valid.
+homing_velocity = 4000
+
+# Profile acceleration (rpm/s). Controls ramp-up time.
+profile_acceleration = 10000
+
+# Profile deceleration (rpm/s). Asymmetric: faster decel -> shorter stopping
+# delta after RISE1, reducing the spread of home_ref across runs.
+profile_deceleration = 15000
