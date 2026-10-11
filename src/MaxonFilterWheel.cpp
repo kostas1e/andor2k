@@ -20,9 +20,15 @@ using namespace std::chrono_literals;
 namespace andor2k {
 
 // Profile position parameters (tune after hardware testing)
-static constexpr unsigned int PROFILE_VELOCITY = 6000;      // rpm
+static constexpr unsigned int PROFILE_VELOCITY =
+    6000; // rpm  (slot-to-slot moves)
+static constexpr unsigned int HOMING_VELOCITY =
+    4000; // rpm  (homing only - measured stopping_delta ~13 k QC at 3000 RPM /
+          // 15k decel; expect ~23 k at 4000 RPM)
 static constexpr unsigned int PROFILE_ACCELERATION = 10000; // rpm/s
-static constexpr unsigned int PROFILE_DECELERATION = 10000; // rpm/s
+static constexpr unsigned int PROFILE_DECELERATION =
+    15000; // rpm/s  (asymmetric: faster stop -> shorter stopping_delta after
+           // RISE1)
 
 // Decode an EposCmd error code to a human-readable string and print it.
 // VCS_GetErrorInfo(code, buf, maxLen) fills buf with the description.
@@ -582,13 +588,13 @@ bool MaxonFilterWheel::home_one_wheel(void *handle, unsigned short node,
     log_epos_error("VCS_SetVelocityProfile", node, err);
     return false;
   }
-  if (!VCS_MoveWithVelocity(handle, node, (long)PROFILE_VELOCITY, &err)) {
+  if (!VCS_MoveWithVelocity(handle, node, (long)HOMING_VELOCITY, &err)) {
     log_epos_error("VCS_MoveWithVelocity", node, err);
     return false;
   }
   printf("[MaxonFilterWheel] node %u: searching for home sensor "
          "at %u RPM...\n",
-         node, PROFILE_VELOCITY);
+         node, HOMING_VELOCITY);
 
   // 2. Find RISE1 using seek_next_rise loop
   // seek_next_rise() returns the QC elapsed in the LOW state before each

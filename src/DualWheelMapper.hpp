@@ -64,9 +64,11 @@ public:
   //     offset.
   //     See commissioning.md Sec.8 for per-wheel procedure.
   static constexpr long LOWER_SENSOR_OFFSET_QC =
-      3L * QC_PER_SLOT; // initial ~180 deg
+      3L * QC_PER_SLOT - 153393L; // cal 2026-07-06 v2: stopped ~1/10 slot
+                                  // (143 393 QC) early -> -143 393
   static constexpr long UPPER_SENSOR_OFFSET_QC =
-      QC_PER_ROTATION - 3L * QC_PER_SLOT; // initial ~180 deg
+      QC_PER_ROTATION - 3L * QC_PER_SLOT -
+      133393L; // cal 2026-07-06 v2: same -143 393 applied
 
   // Legacy aliases - kept so existing references compile unchanged.
   // Prefer the per-wheel names above for all new or modified code.
