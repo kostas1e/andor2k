@@ -55,8 +55,13 @@ pkginclude_HEADERS = \
 	acquisition_series_reporter.hpp \
 	cbase64.hpp \
 	IFilterWheel.hpp \
-	DualWheelMapper.hpp \
-	MockFilterWheel.hpp
+	DualWheelMapper.hpp
+
+if MOCK_WHEEL
+pkginclude_HEADERS += MockFilterWheel.hpp
+else
+pkginclude_HEADERS += MaxonFilterWheel.hpp
+endif
 
 ##
 ##  Source files (distributed).
@@ -91,5 +96,11 @@ dist_libhelmosandor2k_la_SOURCES = \
     get_rta_scan.cpp \
 	abort_listener.cpp \
 	save_as_fits.cpp \
-	DualWheelMapper.cpp \
-	MockFilterWheel.cpp
+	DualWheelMapper.cpp
+
+if MOCK_WHEEL
+dist_libhelmosandor2k_la_SOURCES += MockFilterWheel.cpp
+else
+dist_libhelmosandor2k_la_SOURCES += MaxonFilterWheel.cpp
+libhelmosandor2k_la_LIBADD = $(EPOS_LDFLAGS)
+endif

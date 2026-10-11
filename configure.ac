@@ -68,6 +68,25 @@ if test "x${enable_mock_camera}" = "xyes"; then
 fi
 AM_CONDITIONAL([MOCK_CAMERA],[test "x${enable_mock_camera}" = "xyes"])
 
+# Wheel: --enable-mock-wheel uses MockFilterWheel; default uses real EPOS4.
+AC_ARG_ENABLE([mock-wheel],
+              AS_HELP_STRING([--enable-mock-wheel],
+                             [use mock EPOS4 (no wheel hardware needed)]),
+              [enable_mock_wheel=${enableval}],
+              [enable_mock_wheel=no])
+EPOS_LDFLAGS=""
+AC_SUBST([EPOS_LDFLAGS])
+if test "x${enable_mock_wheel}" = "xyes"; then
+  AC_DEFINE([MOCK_WHEEL],[1],[Mock EPOS4 wheel driver])
+  CPPFLAGS="-DMOCK_WHEEL $CPPFLAGS"
+  AC_MSG_NOTICE([Mock wheel: MockFilterWheel (no EPOS4 needed)])
+else
+  CPPFLAGS="-I/opt/EposCmdLib_6.8.1.0/include $CPPFLAGS"
+  EPOS_LDFLAGS="-lEposCmd"
+  AC_MSG_NOTICE([Real wheel: MaxonFilterWheel (/opt/EposCmdLib_6.8.1.0)])
+fi
+AM_CONDITIONAL([MOCK_WHEEL],[test "x${enable_mock_wheel}" = "xyes"])
+
 AC_CONFIG_FILES([Makefile
                  src/Makefile
                  bin/Makefile
