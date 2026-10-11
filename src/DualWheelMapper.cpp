@@ -54,9 +54,18 @@ long DualWheelMapper::CalculateForwardOnlyTarget(int target_slot,
   // 2. Target relative position
   long target_pos_in_cycle = (long)target_slot * QC_PER_SLOT;
 
-  // 3. Forward-only constraint:
-  // If target is behind the current position in the current cycle,
-  // we must move to the target position in the NEXT cycle.
+  // 3. Forward-only constraint with arrival tolerance.
+  // diff > 0: we've overshot (current is ahead of target in this cycle).
+  // diff < 0: we've undershot (current is behind target in this cycle).
+  // |diff| <= SLOT_TOLERANCE_QC -> within the arrival window:
+  //   return the in-cycle target so the delta sent to SetPosition is at most
+  //   SLOT_TOLERANCE_QC. SetPosition clamps negative deltas (overshoot) to 0
+  //   rather than reversing the motor, preventing the forward-only wrap that
+  //   would otherwise cause a full extra rotation from a 1-QC overshoot.
+  long diff = current_pos_in_cycle - target_pos_in_cycle;
+  if (diff >= -SLOT_TOLERANCE_QC && diff <= SLOT_TOLERANCE_QC) {
+    return current_cycle * QC_PER_ROTATION + target_pos_in_cycle;
+  }
   if (target_pos_in_cycle < current_pos_in_cycle) {
     return (current_cycle + 1) * QC_PER_ROTATION + target_pos_in_cycle;
   } else {

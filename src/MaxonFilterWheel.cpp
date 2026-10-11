@@ -594,17 +594,37 @@ int MaxonFilterWheel::SetPosition(int virtual_slot) {
     // (~8.6M QC), well within the 32-bit drive register. Absolute targets
     // accumulate past INT_MAX after ~249 rotations and would be silently
     // truncated by the drive firmware.
-    const long delta_upper = target.upper_qc - m_upper_qc.load();
-    const long delta_lower = target.lower_qc - m_lower_qc.load();
-    printf("[MaxonFilterWheel] Relative deltas: upper=%ld lower=%ld QC\n",
-           delta_upper, delta_lower);
+    //
+    // CalculateForwardOnlyTarget may return a value slightly below current_qc
+    // when belt overshoot lands within SLOT_TOLERANCE_QC past the target.
+    // Clamp those negative deltas to 0 (forward-only: never reverse) and
+    // skip the move if both wheels are already in their tolerance window.
+    const long delta_upper_raw = target.upper_qc - m_upper_qc.load();
+    const long delta_lower_raw = target.lower_qc - m_lower_qc.load();
+    const long delta_upper = delta_upper_raw < 0 ? 0 : delta_upper_raw;
+    const long delta_lower = delta_lower_raw < 0 ? 0 : delta_lower_raw;
+    printf("[MaxonFilterWheel] Relative deltas: upper=%ld lower=%ld QC"
+           "  (raw %ld %ld)\n",
+           delta_upper, delta_lower, delta_upper_raw, delta_lower_raw);
 
-    VCS_MoveToPosition(m_handle_upper, NODE_UPPER, delta_upper, FALSE, TRUE,
-                       &err);
-    VCS_MoveToPosition(m_handle_lower, NODE_LOWER, delta_lower, FALSE, TRUE,
-                       &err);
+    if (delta_upper == 0 && delta_lower == 0) {
+      printf("[MaxonFilterWheel] Both wheels within +/-%ld QC of slot %d - "
+             "position accepted without move\n",
+             DualWheelMapper::SLOT_TOLERANCE_QC, virtual_slot);
+      m_pos.store(virtual_slot);
+      m_moving.store(false);
+      return;
+    }
 
-    // Poll until both wheels reach target or halt
+    if (delta_upper > 0)
+      VCS_MoveToPosition(m_handle_upper, NODE_UPPER, delta_upper, FALSE, TRUE,
+                         &err);
+    if (delta_lower > 0)
+      VCS_MoveToPosition(m_handle_lower, NODE_LOWER, delta_lower, FALSE, TRUE,
+                         &err);
+
+    // Poll until both wheels reach target or halt.
+    // Wheels not given a move command (delta == 0) are pre-marked as reached.
     while (!m_halt_requested.load()) {
       update_qc(m_upper_qc, m_upper_raw_prev, m_handle_upper, NODE_UPPER);
       update_qc(m_lower_qc, m_lower_raw_prev, m_handle_lower, NODE_LOWER);
@@ -615,9 +635,12 @@ int MaxonFilterWheel::SetPosition(int virtual_slot) {
       poll_sensor(m_handle_lower, NODE_LOWER, m_lower_qc, m_lower_sensor_state,
                   m_lower_di1_prev, LOWER_HOMING_SENSOR_OFFSET_QC);
 
-      int reached_upper = 0, reached_lower = 0;
-      VCS_GetMovementState(m_handle_upper, NODE_UPPER, &reached_upper, &err);
-      VCS_GetMovementState(m_handle_lower, NODE_LOWER, &reached_lower, &err);
+      int reached_upper = (delta_upper == 0) ? 1 : 0;
+      int reached_lower = (delta_lower == 0) ? 1 : 0;
+      if (delta_upper > 0)
+        VCS_GetMovementState(m_handle_upper, NODE_UPPER, &reached_upper, &err);
+      if (delta_lower > 0)
+        VCS_GetMovementState(m_handle_lower, NODE_LOWER, &reached_lower, &err);
 
       if (reached_upper && reached_lower)
         break;

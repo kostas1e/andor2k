@@ -45,6 +45,16 @@ public:
   // Refine after measuring pulse and gap widths on real hardware.
   static constexpr long HOMING_GAP_MAX_QC = QC_PER_SLOT / 2;
 
+  // Arrival tolerance for slot positioning. If the wheel stops within this
+  // many QC of a slot center (in either direction) the position is accepted
+  // without issuing a corrective or a full extra rotation. This absorbs belt
+  // overshoot/undershoot from the rubber-band drive without triggering the
+  // forward-only wrap (overshoot by 1 QC -> full extra rotation).
+  // 10% of QC_PER_SLOT ~6 deg of wheel rotation. Tune after measuring real
+  // belt overshoot at operating speed. Must be << QC_PER_SLOT / 2 so the
+  // tolerance zone of adjacent slots never overlap.
+  static constexpr long SLOT_TOLERANCE_QC = QC_PER_SLOT / 10; // ~143 393 QC
+
   // One or both motors may be mounted mirrored, reversing physical slot order
   // under positive velocity (0->5->4->3->2->1 instead of 0->1->2->3->4->5).
   // When true, MapVirtualToPhysical applies a forward-index reversal for that
