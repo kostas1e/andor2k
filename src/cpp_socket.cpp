@@ -90,7 +90,9 @@ int andor2k::Socket::send(const char *msg, int flag) const noexcept {
 #ifdef SOCKET_LOGGER
   m_logger->print_msg(m_sockid, " Sending msg via Socket", 10);
 #endif
-  return ::send(m_sockid, msg, std::strlen(msg), flag);
+  // MSG_NOSIGNAL: suppress SIGPIPE if the remote end has closed the connection;
+  // return -1/EPIPE instead so callers can handle the error without dying.
+  return ::send(m_sockid, msg, std::strlen(msg), flag | MSG_NOSIGNAL);
 }
 
 int andor2k::Socket::recv(char *buffer, std::size_t buf_sz,
