@@ -8,6 +8,10 @@ noinst_PROGRAMS = testClientSocket \
   testNtpTime \
   testParallelAbort
 
+if MOCK_CAMERA
+AM_LDFLAGS = -L$(top_srcdir)/sim/lib
+endif
+
 MCXXFLAGS = \
 	-std=c++17 \
 	-g \

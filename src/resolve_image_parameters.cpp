@@ -1,5 +1,6 @@
 #include "andor2k.hpp"
 #include "andor2kd.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -389,9 +390,11 @@ int resolve_image_parameters(const char *command,
     status = 2;
   }
 
+#ifndef MOCK_CAMERA
   // TODO why the fuck do i need this here? i actually think i don't, its fixed
   std::memset(params.save_dir_, 0, 128);
   std::strcpy(params.save_dir_, "/home/andor2k/fits");
+#endif
 
   if (params.read_out_mode_ != ReadOutMode::Image) {
     fprintf(stderr,

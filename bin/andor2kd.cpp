@@ -1,15 +1,20 @@
 #include "andor2kd.hpp"
+
 #include "andor2k.hpp"
 #include "atmcdLXd.h"
 #include "cpp_socket.hpp"
 #include "cppfits.hpp"
 #include "fits_header.hpp"
+
 #include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#ifdef MOCK_CAMERA
+#include <filesystem>
+#endif
 #include <fstream>
 #include <pthread.h>
 #include <thread>
@@ -306,6 +311,21 @@ int main() {
 
   // initialize AndorParameters
   params.set_defaults();
+#ifdef MOCK_CAMERA
+  // Ensure the sim FITS output directory exists and point params at it
+  constexpr const char *kSimFitsDir = "/tmp/andor2k/fits";
+  {
+    std::error_code ec;
+    std::filesystem::create_directories(kSimFitsDir, ec);
+    if (ec)
+      fprintf(stderr, "[WRNNG][%s] Could not create %s: %s\n",
+              date_str(now_str), kSimFitsDir, ec.message().c_str());
+    else
+      printf("[DEBUG][%s] SIM: FITS output directory: %s\n", date_str(now_str),
+             kSimFitsDir);
+  }
+  std::strcpy(params.save_dir_, kSimFitsDir);
+#endif
   if (params.read_out_mode_ != ReadOutMode::Image) {
     printf("WTF?? main ~199 readoutmode is not image\n");
     return 10;

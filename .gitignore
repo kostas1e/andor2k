@@ -60,3 +60,17 @@ moc_*
 .deps/
 .dirstamp
 .libs/
+
+# Simulation & Local Development
+bin/dandor2kd
+bin/testAndor
+configure~
+test/testClientSocket
+test/testCmdParser
+test/testFCC
+test/testFitsFilename
+test/testFitsHeaders
+test/testNtpTime
+test/testParallelAbort
+test/testParsingFCCResponse
+test/testServerSocket

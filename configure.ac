@@ -55,6 +55,19 @@ AC_C_INLINE
 # Checks for library functions.
 AC_CHECK_FUNCS([floor modf pow sqrt])
 
+# Camera: --enable-mock-camera uses stub Andor SDK; default requires real SDK.
+AC_ARG_ENABLE([mock-camera],
+              AS_HELP_STRING([--enable-mock-camera],
+                             [use mock Andor SDK (no camera hardware needed)]),
+              [enable_mock_camera=${enableval}],
+              [enable_mock_camera=no])
+if test "x${enable_mock_camera}" = "xyes"; then
+  AC_DEFINE([MOCK_CAMERA],[1],[Mock Andor camera SDK])
+  CPPFLAGS="-DMOCK_CAMERA -I\$(top_srcdir)/sim $CPPFLAGS"
+  AC_MSG_NOTICE([Mock camera: stub Andor SDK (no camera hardware needed)])
+fi
+AM_CONDITIONAL([MOCK_CAMERA],[test "x${enable_mock_camera}" = "xyes"])
+
 AC_CONFIG_FILES([Makefile
                  src/Makefile
                  bin/Makefile
