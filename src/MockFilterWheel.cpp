@@ -1,6 +1,8 @@
 #include "MockFilterWheel.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <thread>
 
@@ -8,11 +10,41 @@ using namespace std::chrono_literals;
 
 namespace andor2k {
 
-// Step size per simulation tick (QC units). At 5 ms/tick this gives
-// ~286 ticks for one full slot rotation, which feels realistic.
-static constexpr long SIM_QC_STEP = 5000L;
+// Position along a trapezoidal velocity profile at time t [s].
+// dist_qc = total distance; v_max/a/d in QC/s and QC/s².
+// Returns clamped to [0, dist_qc]; safe to call with t beyond move end.
+static double sim_qc_at_time(double t, double dist_qc,
+                             double v_max, double a, double d) {
+  const double d_a = v_max * v_max / (2.0 * a);
+  const double d_d = v_max * v_max / (2.0 * d);
+  double pos;
+  if (d_a + d_d <= dist_qc) {
+    // Full trapezoidal: accel → constant → decel
+    const double t_a = v_max / a;
+    const double t_c = (dist_qc - d_a - d_d) / v_max;
+    if (t <= t_a)
+      pos = 0.5 * a * t * t;
+    else if (t <= t_a + t_c)
+      pos = d_a + v_max * (t - t_a);
+    else {
+      const double tau = t - t_a - t_c;
+      pos = d_a + v_max * t_c + v_max * tau - 0.5 * d * tau * tau;
+    }
+  } else {
+    // Triangle: never reaches v_max
+    const double v_pk = std::sqrt(2.0 * dist_qc * a * d / (a + d));
+    const double t_a  = v_pk / a;
+    if (t <= t_a)
+      pos = 0.5 * a * t * t;
+    else {
+      const double tau = t - t_a;
+      pos = 0.5 * a * t_a * t_a + v_pk * tau - 0.5 * d * tau * tau;
+    }
+  }
+  return std::min(dist_qc, std::max(0.0, pos));
+}
 
-MockFilterWheel::MockFilterWheel() = default;
+MockFilterWheel::MockFilterWheel() : m_rng(std::random_device{}()) {}
 
 MockFilterWheel::~MockFilterWheel() {
   join_worker();
@@ -28,6 +60,15 @@ int MockFilterWheel::Connect() {
   return 0;
 }
 
+void MockFilterWheel::configure(const WheelConfig &cfg) {
+  m_profile_velocity = cfg.profile_velocity;
+  m_homing_velocity  = cfg.homing_velocity;
+  m_profile_accel    = cfg.profile_acceleration;
+  m_profile_decel    = cfg.profile_deceleration;
+  printf("[SIM][MockFilterWheel] configure: vel=%u hom_vel=%u accel=%u decel=%u RPM(s)\n",
+         m_profile_velocity, m_homing_velocity, m_profile_accel, m_profile_decel);
+}
+
 int MockFilterWheel::Disconnect() {
   join_worker();
   printf("[SIM][MockFilterWheel] Disconnect() - no-op\n");
@@ -37,48 +78,79 @@ int MockFilterWheel::Disconnect() {
 bool MockFilterWheel::simulate_travel(std::atomic<long> &qc,
                                       SensorState &sensor_state, long target_qc,
                                       long sensor_offset,
-                                      unsigned short node_id, int step_us) {
-  while (qc.load() < target_qc) {
-    if (m_halt_requested.load())
-      return false;
-    long prev_qc = qc.load();
-    long next_qc = std::min(prev_qc + SIM_QC_STEP, target_qc);
-    qc.store(next_qc);
-    check_sensor(qc, sensor_state, prev_qc, next_qc, sensor_offset, node_id);
-    std::this_thread::sleep_for(std::chrono::microseconds(step_us));
+                                      unsigned short node_id) {
+  const long dist_qc = target_qc - qc.load();
+  if (dist_qc <= 0) return true;
+
+  // Convert motion profile (RPM, RPM/s) to QC-based units.
+  const double v_max = m_profile_velocity * SIM_QCS_PER_RPM; // QC/s
+  const double a     = m_profile_accel    * SIM_QCS_PER_RPM; // QC/s²
+  const double d     = m_profile_decel    * SIM_QCS_PER_RPM; // QC/s²
+
+  // Trapezoidal total move time.
+  const double d_a = v_max * v_max / (2.0 * a);
+  const double d_d = v_max * v_max / (2.0 * d);
+  double total_s;
+  if (d_a + d_d <= dist_qc)
+    total_s = v_max / a + (dist_qc - d_a - d_d) / v_max + v_max / d;
+  else {
+    const double v_pk = std::sqrt(2.0 * dist_qc * a * d / (a + d));
+    total_s = v_pk / a + v_pk / d;
   }
+  printf("[SIM][MockFilterWheel] node %u: dist=%ld QC total_s=%.2fs\n",
+         node_id, dist_qc, total_s);
+
+  const double dt       = SIM_TICK_US / 1.0e6;
+  const long start_qc   = qc.load();
+  double t = 0.0;
+
+  while (t < total_s) {
+    if (m_halt_requested.load()) return false;
+    t += dt;
+    if (t > total_s) t = total_s;
+
+    long prev_val = qc.load();
+    long next_val = start_qc + (long)sim_qc_at_time(t, (double)dist_qc, v_max, a, d);
+    if (next_val > target_qc) next_val = target_qc;
+    qc.store(next_val);
+    check_sensor(qc, sensor_state, prev_val, next_val, sensor_offset, node_id);
+    std::this_thread::sleep_for(std::chrono::microseconds(SIM_TICK_US));
+  }
+  qc.store(target_qc);
   return true;
 }
 
-// Sensor state machine - called after every QC step.
-// Detects rotation boundary crossings (first trigger) and snaps the
-// accumulated QC counter to the nearest rotation boundary to eliminate
-// belt/pulley drift. The second trigger of each double-pulse pair is
-// tracked and silently discarded.
 void MockFilterWheel::check_sensor(std::atomic<long> &qc, SensorState &state,
                                    long prev_qc, long next_qc,
                                    long sensor_offset, unsigned short node_id) {
+  // Per-node sensor flag geometry (measurements 2026-07-06 at 3000 RPM).
+  const long tab1 = (node_id == 1) ? SIM_TAB1_UPPER_QC : SIM_TAB1_LOWER_QC;
+  const long gap  = (node_id == 1) ? SIM_GAP_UPPER_QC  : SIM_GAP_LOWER_QC;
+  const long tab2 = (node_id == 1) ? SIM_TAB2_UPPER_QC : SIM_TAB2_LOWER_QC;
+  const long rise2_off = tab1 + gap;   // RISE2 position from RISE1 within cycle
+  const long end_off   = rise2_off + tab2; // trailing edge of tab2
+
   switch (state) {
   case SensorState::IDLE: {
-    long prev_cycle =
+    const long prev_cycle =
         (prev_qc - sensor_offset) / DualWheelMapper::s_qc_per_rotation;
-    long next_cycle =
+    const long next_cycle =
         (next_qc - sensor_offset) / DualWheelMapper::s_qc_per_rotation;
     if (next_cycle > prev_cycle) {
-      // Crossed a sensor trigger point - snap accumulator to remove drift.
-      long expected_qc =
+      // RISE1: snap position and log drift with Gaussian belt jitter.
+      const long expected_qc =
           next_cycle * DualWheelMapper::s_qc_per_rotation + sensor_offset;
-      long current = qc.load();
-      long drift = current - expected_qc; // always >= 0 (forward-only)
-      printf("[SIM][MockFilterWheel] DI1\xe2\x86\x91 node %u: QC %ld "
-             "\xe2\x86\x92 %ld (drift %+ld QC)\n",
+      const long current = qc.load();
+      const long jitter  = (long)m_drift_dist(m_rng);
+      const long drift   = (current - expected_qc) + jitter;
+      printf("[SIM][MockFilterWheel] DI1^ node %u: QC %ld -> %ld (drift %+ld QC)\n",
              node_id, current, expected_qc, drift);
-      if (drift < DualWheelMapper::s_max_drift_qc) {
+      if (std::abs(drift) < DualWheelMapper::s_max_drift_qc) {
         qc.store(expected_qc);
       } else {
-        printf("[SIM][MockFilterWheel] WARNING node %u: drift %ld QC exceeds "
-               "threshold - home invalidated\n",
-               node_id, drift);
+        printf("[SIM][MockFilterWheel] WARNING node %u: drift %ld QC "
+               "exceeds threshold - home invalidated\n",
+               node_id, std::abs(drift));
         m_homed.store(false);
       }
       state = SensorState::FIRST_PULSE;
@@ -86,25 +158,29 @@ void MockFilterWheel::check_sensor(std::atomic<long> &qc, SensorState &state,
     break;
   }
   case SensorState::FIRST_PULSE: {
-    long pos = (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
-    if (pos >= SIM_SENSOR_PULSE1_QC) {
+    const long pos =
+        (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
+    if (pos >= tab1)
       state = SensorState::GAP;
-    }
     break;
   }
   case SensorState::GAP: {
-    long pos = (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
-    if (pos >= SIM_SENSOR_PULSE1_QC + SIM_SENSOR_GAP_QC) {
+    const long pos =
+        (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
+    if (pos >= rise2_off) {
+      // RISE2: log for realism; not used for position correction.
+      printf("[SIM][MockFilterWheel] DI1^ node %u RISE2 at +%ld QC "
+             "(inter-pulse gap, not corrected)\n",
+             node_id, rise2_off);
       state = SensorState::SECOND_PULSE;
     }
     break;
   }
   case SensorState::SECOND_PULSE: {
-    long pos = (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
-    if (pos >=
-        SIM_SENSOR_PULSE1_QC + SIM_SENSOR_GAP_QC + SIM_SENSOR_PULSE2_QC) {
+    const long pos =
+        (next_qc - sensor_offset) % DualWheelMapper::s_qc_per_rotation;
+    if (pos >= end_off)
       state = SensorState::IDLE;
-    }
     break;
   }
   }
@@ -121,11 +197,12 @@ int MockFilterWheel::GoHome() {
 
   m_worker = std::thread([this]() {
     printf("[SIM][MockFilterWheel] Homing started\n");
-    // Simulate travel: wheels return to QC that is the next multiple of
-    // QC_PER_ROTATION >= current. For sim we simply advance to the next
-    // rotation boundary from 0 (i.e. both wheels drive to their own next
-    // home position). We approximate this as a 2-second delay.
-    std::this_thread::sleep_for(2000ms);
+    // Approximate homing time: assume half-rotation worst-case travel
+    // at homing velocity (same SIM_QCS_PER_RPM scale as SetPosition).
+    const long home_dist_qc = DualWheelMapper::s_qc_per_rotation / 2;
+    const double v_home     = m_homing_velocity * SIM_QCS_PER_RPM;
+    const int home_ms = std::max(200, (int)(1000.0 * home_dist_qc / v_home));
+    std::this_thread::sleep_for(std::chrono::milliseconds(home_ms));
 
     if (!m_halt_requested.load()) {
       // Set accumulators to the per-wheel sensor offset (mirrors real homing).
