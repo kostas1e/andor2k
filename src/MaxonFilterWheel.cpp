@@ -418,11 +418,29 @@ int MaxonFilterWheel::GoHome() {
       m_halt_requested.store(false); // restore for next command
 
     if (upper_ok && lower_ok && !m_halt_requested.load()) {
-      // Re-arm sensor state machines for the first correction after homing.
-      m_upper_sensor_state = SensorState::IDLE;
-      m_lower_sensor_state = SensorState::IDLE;
-      m_upper_di1_prev = false;
-      m_lower_di1_prev = false;
+      // Initialise sensor state machines from the actual DI1 state.
+      // After homing the wheel is stopped just past RISE1; the flag tab may
+      // still cover the sensor. Setting state to IDLE with di1_prev=false
+      // causes the next RISE2 (second flag tab, ~230K QC ahead) to be
+      // mis-identified as RISE1, producing a spurious "home invalidated".
+      //
+      // Correct state:
+      //   DI1 = HIGH -> wheel still inside RISE1 flag -> FIRST_PULSE
+      //   DI1 = LOW -> wheel past RISE1 flag, in short gap -> GAP
+      auto read_di1 = [](void *handle, unsigned short node) -> bool {
+        unsigned int di_val = 0, bytes = 0, err = 0;
+        VCS_GetObject(handle, node, 0x60FD, 0x00, &di_val, sizeof(di_val),
+                      &bytes, &err);
+        return (di_val >> 2) & 1u;
+      };
+      bool upper_di1 = read_di1(m_handle_upper, NODE_UPPER);
+      bool lower_di1 = read_di1(m_handle_lower, NODE_LOWER);
+      m_upper_sensor_state =
+          upper_di1 ? SensorState::FIRST_PULSE : SensorState::GAP;
+      m_lower_sensor_state =
+          lower_di1 ? SensorState::FIRST_PULSE : SensorState::GAP;
+      m_upper_di1_prev = upper_di1;
+      m_lower_di1_prev = lower_di1;
       m_homed.store(true);
       // m_pos stays -1 (unknown) - operator should press Go -> slot 0
       // to verify physical alignment after calibrating HOMING_SENSOR_OFFSET_QC.
